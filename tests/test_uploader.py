@@ -62,6 +62,21 @@ def _make_session_file(
     return filepath
 
 
+def _mock_urlopen_with_get(uploaded_count: int = 0):
+    """Create a mock urlopen that returns uploadedCount JSON for GET requests
+    and a simple 200 for POST requests."""
+    def side_effect(req, **kwargs):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        if req.get_method() == "GET":
+            body = json.dumps({"uploadedCount": uploaded_count}).encode("utf-8")
+            mock_resp.read.return_value = body
+        return mock_resp
+    return side_effect
+
+
 class TestDirectoryStructure:
     """Ensure pending/, uploaded/, failed/ are created on init."""
 
@@ -94,10 +109,6 @@ class TestMaybeUploadEmptyUrl:
 
     def test_whitespace_url_noop(self, tmp_path):
         """URL with only whitespace gets rstripped to empty."""
-        uploader = _make_uploader(tmp_path, url="   ")
-        # The rstrip in __init__ turns "   " into "   " (non-empty) but
-        # url.rstrip("/") on whitespace still leaves whitespace, which is truthy.
-        # This is fine — the test verifies that an empty string triggers the guard.
         uploader2 = _make_uploader(tmp_path, url="")
         pending_dir = tmp_path / "pending"
         _make_session_file(pending_dir)
@@ -207,43 +218,83 @@ class TestParseSessionStart:
         assert result["session_id"] == "found_it"
 
 
-class TestProgressRoundTrip:
-    """Test _read_progress and _write_progress."""
+class TestGetUploadedCount:
+    """Test _get_uploaded_count fetches count from server."""
 
-    def test_write_and_read(self, tmp_path):
+    @patch("src.uploader.urllib.request.urlopen")
+    def test_returns_count_from_server(self, mock_urlopen, tmp_path):
         uploader = _make_uploader(tmp_path)
-        fake_file = tmp_path / "pending" / "test.jsonl"
-        fake_file.touch()
 
-        uploader._write_progress(fake_file, 42)
-        assert uploader._read_progress(fake_file) == 42
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = json.dumps({"uploadedCount": 42}).encode("utf-8")
+        mock_urlopen.return_value = mock_resp
 
-    def test_read_returns_zero_when_no_progress(self, tmp_path):
+        count = uploader._get_uploaded_count("session123")
+        assert count == 42
+
+    @patch("src.uploader.urllib.request.urlopen")
+    def test_returns_zero_when_field_missing(self, mock_urlopen, tmp_path):
         uploader = _make_uploader(tmp_path)
-        fake_file = tmp_path / "pending" / "test.jsonl"
-        fake_file.touch()
 
-        assert uploader._read_progress(fake_file) == 0
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = json.dumps({"sessionId": "session123"}).encode("utf-8")
+        mock_urlopen.return_value = mock_resp
 
-    def test_progress_file_format(self, tmp_path):
+        count = uploader._get_uploaded_count("session123")
+        assert count == 0
+
+    @patch("src.uploader.urllib.request.urlopen")
+    def test_returns_none_on_network_error(self, mock_urlopen, tmp_path):
+        """Network error on GET /session/{id} should return None, causing upload to return False."""
+        import urllib.error
         uploader = _make_uploader(tmp_path)
-        fake_file = tmp_path / "pending" / "test.jsonl"
-        fake_file.touch()
+        mock_urlopen.side_effect = urllib.error.URLError("connection refused")
 
-        uploader._write_progress(fake_file, 100)
+        count = uploader._get_uploaded_count("session123")
+        assert count is None
 
-        progress_file = fake_file.with_suffix(".jsonl.progress")
-        assert progress_file.exists()
-        content = progress_file.read_text()
-        assert "uploaded_lines=100" in content
+    @patch("src.uploader.urllib.request.urlopen")
+    def test_network_error_causes_upload_failure(self, mock_urlopen, tmp_path):
+        """When _get_uploaded_count returns None due to network error, _upload_file returns False."""
+        import urllib.error
+        uploader = _make_uploader(tmp_path)
+        pending = tmp_path / "pending"
+
+        data_entries = [
+            {"ts": 1700000001.0, "key": "/speed", "type": "double", "value": 3.14},
+        ]
+        filepath = _make_session_file(pending, extra_entries=data_entries)
+
+        call_count = [0]
+
+        def side_effect(req, **kwargs):
+            call_count[0] += 1
+            if req.get_method() == "POST":
+                # Session create succeeds
+                mock_resp = MagicMock()
+                mock_resp.status = 200
+                mock_resp.__enter__ = lambda s: s
+                mock_resp.__exit__ = MagicMock(return_value=False)
+                return mock_resp
+            else:
+                # GET fails
+                raise urllib.error.URLError("connection refused")
+
+        mock_urlopen.side_effect = side_effect
+
+        result = uploader._upload_file(filepath)
+        assert result is False
 
 
 class TestUploadFileHTTP:
     """Test _upload_file sends correct HTTP requests."""
 
     @patch("src.uploader.urllib.request.urlopen")
-    @patch("src.uploader.urllib.request.Request")
-    def test_upload_sends_session_create_and_data_and_complete(self, mock_request_cls, mock_urlopen, tmp_path):
+    def test_upload_sends_session_create_and_data_and_complete(self, mock_urlopen, tmp_path):
         uploader = _make_uploader(tmp_path, batch_size=500)
         pending = tmp_path / "pending"
 
@@ -253,47 +304,48 @@ class TestUploadFileHTTP:
         ]
         filepath = _make_session_file(pending, extra_entries=data_entries)
 
-        # Mock successful HTTP responses
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        # Track requests made
+        requests_made = []
+
+        def side_effect(req, **kwargs):
+            requests_made.append(req)
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            if req.get_method() == "GET":
+                mock_resp.read.return_value = json.dumps({"uploadedCount": 0}).encode("utf-8")
+            return mock_resp
+
+        mock_urlopen.side_effect = side_effect
 
         result = uploader._upload_file(filepath)
         assert result is True
 
-        # Should have made 3 requests: session create, data batch, complete
-        assert mock_request_cls.call_count == 3
-
-        # Check first call — session create
-        first_call = mock_request_cls.call_args_list[0]
-        assert "/api/telemetry/session" in first_call[1].get("url", first_call[0][0])
-        assert first_call[1].get("method", "") == "POST" or first_call[0][0].endswith("/session")
+        # Should have made 4 requests: session create (POST), get count (GET), data batch (POST), complete (POST)
+        assert len(requests_made) == 4
+        assert requests_made[0].get_method() == "POST"  # session create
+        assert requests_made[1].get_method() == "GET"    # get uploaded count
+        assert requests_made[2].get_method() == "POST"   # data batch
+        assert requests_made[3].get_method() == "POST"   # complete
 
     @patch("src.uploader.urllib.request.urlopen")
-    @patch("src.uploader.urllib.request.Request")
-    def test_upload_includes_api_key_header(self, mock_request_cls, mock_urlopen, tmp_path):
+    def test_upload_includes_api_key_header(self, mock_urlopen, tmp_path):
         uploader = _make_uploader(tmp_path, api_key="my-secret-key")
         pending = tmp_path / "pending"
         filepath = _make_session_file(pending)
 
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        mock_urlopen.side_effect = _mock_urlopen_with_get(uploaded_count=0)
 
         uploader._upload_file(filepath)
 
-        # Every request should have the API key header
-        for call in mock_request_cls.call_args_list:
-            headers = call[1].get("headers", {})
-            assert headers.get("X-Telemetry-Key") == "my-secret-key"
+        # Check that POST requests include the API key
+        for call in mock_urlopen.call_args_list:
+            req = call[0][0]
+            assert req.get_header("X-telemetry-key") == "my-secret-key"
 
     @patch("src.uploader.urllib.request.urlopen")
-    @patch("src.uploader.urllib.request.Request")
-    def test_upload_empty_file_returns_true(self, mock_request_cls, mock_urlopen, tmp_path):
+    def test_upload_empty_file_returns_true(self, mock_urlopen, tmp_path):
         uploader = _make_uploader(tmp_path)
         pending = tmp_path / "pending"
 
@@ -302,26 +354,97 @@ class TestUploadFileHTTP:
 
         result = uploader._upload_file(empty_file)
         assert result is True
-        mock_request_cls.assert_not_called()
+        mock_urlopen.assert_not_called()
+
+    @patch("src.uploader.urllib.request.urlopen")
+    def test_server_has_some_entries_skips_uploaded(self, mock_urlopen, tmp_path):
+        """When server already has some entries, client should skip those and upload remaining."""
+        uploader = _make_uploader(tmp_path, batch_size=500)
+        pending = tmp_path / "pending"
+
+        data_entries = [
+            {"ts": 1700000001.0 + i, "key": f"/val{i}", "type": "double", "value": float(i)}
+            for i in range(5)
+        ]
+        filepath = _make_session_file(pending, extra_entries=data_entries)
+
+        # Server already has 3 entries (out of 6 total: 5 data + 1 session_end)
+        requests_made = []
+        data_payloads = []
+
+        def side_effect(req, **kwargs):
+            requests_made.append(req)
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            if req.get_method() == "GET":
+                mock_resp.read.return_value = json.dumps({"uploadedCount": 3}).encode("utf-8")
+            elif req.get_method() == "POST" and "/data" in req.full_url:
+                data_payloads.append(json.loads(req.data.decode("utf-8")))
+            return mock_resp
+
+        mock_urlopen.side_effect = side_effect
+
+        result = uploader._upload_file(filepath)
+        assert result is True
+
+        # Should have uploaded only 3 remaining entries (6 total - 3 already uploaded)
+        assert len(data_payloads) == 1
+        assert len(data_payloads[0]) == 3
+
+    @patch("src.uploader.urllib.request.urlopen")
+    def test_server_has_all_entries_skips_data_upload(self, mock_urlopen, tmp_path):
+        """When server already has all entries, client should skip data upload and only call /complete."""
+        uploader = _make_uploader(tmp_path, batch_size=500)
+        pending = tmp_path / "pending"
+
+        data_entries = [
+            {"ts": 1700000001.0 + i, "key": f"/val{i}", "type": "double", "value": float(i)}
+            for i in range(3)
+        ]
+        filepath = _make_session_file(pending, extra_entries=data_entries)
+        # File has 3 data entries + 1 session_end = 4 non-session_start entries
+
+        requests_made = []
+
+        def side_effect(req, **kwargs):
+            requests_made.append(req)
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            if req.get_method() == "GET":
+                mock_resp.read.return_value = json.dumps({"uploadedCount": 4}).encode("utf-8")
+            return mock_resp
+
+        mock_urlopen.side_effect = side_effect
+
+        result = uploader._upload_file(filepath)
+        assert result is True
+
+        # Should be: POST session, GET count, POST complete — no data POST
+        methods_and_urls = [(r.get_method(), r.full_url) for r in requests_made]
+        assert len(requests_made) == 3
+        assert requests_made[0].get_method() == "POST"  # session create
+        assert requests_made[1].get_method() == "GET"    # get count
+        assert requests_made[2].get_method() == "POST"   # complete
+        # Verify no /data endpoint was called
+        assert not any("/data" in r.full_url for r in requests_made)
 
 
 class TestFileMoveAfterUpload:
     """Test that files are moved from pending/ to uploaded/ after success."""
 
     @patch("src.uploader.urllib.request.urlopen")
-    @patch("src.uploader.urllib.request.Request")
-    def test_file_moved_to_uploaded(self, mock_request_cls, mock_urlopen, tmp_path):
+    def test_file_moved_to_uploaded(self, mock_urlopen, tmp_path):
         uploader = _make_uploader(tmp_path, upload_interval=0.0)
         pending = tmp_path / "pending"
         uploaded = tmp_path / "uploaded"
 
         filepath = _make_session_file(pending)
 
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        mock_urlopen.side_effect = _mock_urlopen_with_get(uploaded_count=0)
 
         uploader.maybe_upload()
 
@@ -329,27 +452,6 @@ class TestFileMoveAfterUpload:
         assert len(list(pending.glob("*.jsonl"))) == 0
         # File should be in uploaded
         assert len(list(uploaded.glob("*.jsonl"))) == 1
-
-    @patch("src.uploader.urllib.request.urlopen")
-    @patch("src.uploader.urllib.request.Request")
-    def test_progress_deleted_after_success(self, mock_request_cls, mock_urlopen, tmp_path):
-        uploader = _make_uploader(tmp_path, upload_interval=0.0)
-        pending = tmp_path / "pending"
-
-        data_entries = [{"ts": 1700000001.0 + i, "key": f"/k{i}", "type": "double", "value": float(i)} for i in range(10)]
-        filepath = _make_session_file(pending, extra_entries=data_entries)
-
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
-
-        uploader.maybe_upload()
-
-        # No progress files should remain
-        assert len(list(pending.glob("*.progress"))) == 0
-        assert len(list((tmp_path / "uploaded").glob("*.progress"))) == 0
 
 
 class TestExponentialBackoff:
@@ -475,29 +577,12 @@ class TestPruneUploaded:
         # Should not prune when retention_days <= 0
         assert f.exists()
 
-    def test_prune_also_removes_stale_progress(self, tmp_path):
-        uploader = _make_uploader(tmp_path)
-        uploaded = tmp_path / "uploaded"
-
-        old_file = uploaded / "old.jsonl"
-        old_file.write_text("{}\n")
-        progress = uploaded / "old.jsonl.progress"
-        progress.write_text("uploaded_lines=5\n")
-
-        old_time = time.time() - (100 * 86400)
-        os.utime(old_file, (old_time, old_time))
-
-        uploader.prune_uploaded(retention_days=30)
-        assert not old_file.exists()
-        assert not progress.exists()
-
 
 class TestMalformedJSONL:
     """Test that malformed JSONL lines are skipped during upload."""
 
     @patch("src.uploader.urllib.request.urlopen")
-    @patch("src.uploader.urllib.request.Request")
-    def test_malformed_lines_skipped(self, mock_request_cls, mock_urlopen, tmp_path):
+    def test_malformed_lines_skipped(self, mock_urlopen, tmp_path):
         uploader = _make_uploader(tmp_path)
         pending = tmp_path / "pending"
 
@@ -513,11 +598,7 @@ class TestMalformedJSONL:
         ]
         filepath.write_text("\n".join(lines) + "\n")
 
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        mock_urlopen.side_effect = _mock_urlopen_with_get(uploaded_count=0)
 
         # Should succeed without raising
         result = uploader._upload_file(filepath)
@@ -528,65 +609,62 @@ class TestUploadBatching:
     """Test that large entry lists are split into batches."""
 
     @patch("src.uploader.urllib.request.urlopen")
-    @patch("src.uploader.urllib.request.Request")
-    def test_batches_data_entries(self, mock_request_cls, mock_urlopen, tmp_path):
+    def test_batches_data_entries(self, mock_urlopen, tmp_path):
         uploader = _make_uploader(tmp_path, batch_size=3)
         pending = tmp_path / "pending"
 
-        # Create 7 data entries => should be 3 batches (3, 3, 1) + session create + complete = 5 requests
+        # Create 7 data entries => 7 data + 1 session_end = 8 non-session_start entries
+        # ceil(8/3) = 3 data batches
         data_entries = [
             {"ts": 1700000001.0 + i, "key": f"/val{i}", "type": "double", "value": float(i)}
             for i in range(7)
         ]
         filepath = _make_session_file(pending, extra_entries=data_entries)
 
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        requests_made = []
+
+        def side_effect(req, **kwargs):
+            requests_made.append(req)
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            if req.get_method() == "GET":
+                mock_resp.read.return_value = json.dumps({"uploadedCount": 0}).encode("utf-8")
+            return mock_resp
+
+        mock_urlopen.side_effect = side_effect
 
         result = uploader._upload_file(filepath)
         assert result is True
 
-        # 1 session create + 3 data batches + 1 complete = 5 requests
-        # (session_end is also an entry in data batches, so 7 data + 1 session_end = 8 entries, ceil(8/3)=3 batches)
-        assert mock_request_cls.call_count == 5
+        # 1 session create + 1 GET count + 3 data batches + 1 complete = 6 requests
+        assert len(requests_made) == 6
 
 
 class TestUploadStatusAttributes:
     """Test that public status attributes are updated correctly."""
 
     @patch("src.uploader.urllib.request.urlopen")
-    @patch("src.uploader.urllib.request.Request")
-    def test_files_uploaded_increments(self, mock_request_cls, mock_urlopen, tmp_path):
+    def test_files_uploaded_increments(self, mock_urlopen, tmp_path):
         uploader = _make_uploader(tmp_path, upload_interval=0.0)
         pending = tmp_path / "pending"
 
         _make_session_file(pending, filename="file1.jsonl", session_id="id1")
 
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        mock_urlopen.side_effect = _mock_urlopen_with_get(uploaded_count=0)
 
         assert uploader.files_uploaded == 0
         uploader.maybe_upload()
         assert uploader.files_uploaded == 1
 
     @patch("src.uploader.urllib.request.urlopen")
-    @patch("src.uploader.urllib.request.Request")
-    def test_last_upload_result_on_success(self, mock_request_cls, mock_urlopen, tmp_path):
+    def test_last_upload_result_on_success(self, mock_urlopen, tmp_path):
         uploader = _make_uploader(tmp_path, upload_interval=0.0)
         pending = tmp_path / "pending"
         _make_session_file(pending, filename="good.jsonl", session_id="goodid")
 
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        mock_urlopen.side_effect = _mock_urlopen_with_get(uploaded_count=0)
 
         uploader.maybe_upload()
         assert "OK" in uploader.last_upload_result
@@ -598,19 +676,14 @@ class TestUploadStatusAttributes:
         assert uploader.currently_uploading is False
 
     @patch("src.uploader.urllib.request.urlopen")
-    @patch("src.uploader.urllib.request.Request")
-    def test_files_pending_updated(self, mock_request_cls, mock_urlopen, tmp_path):
+    def test_files_pending_updated(self, mock_urlopen, tmp_path):
         uploader = _make_uploader(tmp_path, upload_interval=0.0)
         pending = tmp_path / "pending"
 
         _make_session_file(pending, filename="f1.jsonl", session_id="id1")
         _make_session_file(pending, filename="f2.jsonl", session_id="id2")
 
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        mock_urlopen.side_effect = _mock_urlopen_with_get(uploaded_count=0)
 
         uploader.maybe_upload()
         # One uploaded, one still pending
@@ -621,8 +694,7 @@ class TestUploadFileNoSessionStart:
     """Test _upload_file when file has no session_start marker."""
 
     @patch("src.uploader.urllib.request.urlopen")
-    @patch("src.uploader.urllib.request.Request")
-    def test_no_session_start_returns_true(self, mock_request_cls, mock_urlopen, tmp_path):
+    def test_no_session_start_returns_true(self, mock_urlopen, tmp_path):
         uploader = _make_uploader(tmp_path)
         pending = tmp_path / "pending"
 
@@ -634,7 +706,7 @@ class TestUploadFileNoSessionStart:
         result = uploader._upload_file(filepath)
         assert result is True
         # No HTTP requests should have been made
-        mock_request_cls.assert_not_called()
+        mock_urlopen.assert_not_called()
 
 
 class TestUrlTrailingSlash:
