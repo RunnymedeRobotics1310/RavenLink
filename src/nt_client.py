@@ -69,7 +69,7 @@ class NTClient:
         self._robot_ip = f"10.{te}.{am}.2"
 
         self._inst = ntcore.NetworkTableInstance.create()
-        self._inst.startClient4("frc-obs-bridge")
+        self._inst.startClient4("ravenlink")
         self._inst.setServer(self._robot_ip, 5810)
 
         table = self._inst.getTable("FMSInfo")

@@ -1,4 +1,4 @@
-"""Configuration for frc-obs-bridge — CLI args + config.ini support."""
+"""Configuration for RavenLink — CLI args + config.ini support."""
 
 import argparse
 import configparser
@@ -186,7 +186,7 @@ def load_config() -> Config:
             ini_dashboard = dict(cp["dashboard"])
 
     parser = argparse.ArgumentParser(
-        description="FRC OBS Recording Bridge — auto start/stop OBS recording + NT data collection"
+        description="RavenLink — FRC robot data bridge: OBS recording, NT telemetry, RavenBrain upload"
     )
     parser.add_argument(
         "--team", type=int,

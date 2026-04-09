@@ -38,7 +38,7 @@ class TrayIcon:
         self._dashboard_url = dashboard_url
         self._icon: Optional["pystray.Icon"] = None
         self._thread: Optional[threading.Thread] = None
-        self._tooltip = "FRC OBS Bridge"
+        self._tooltip = "RavenLink"
         self._color = "gray"
         self._status_text = "IDLE"
         self._nt_text = "NT: Unknown"
@@ -55,7 +55,7 @@ class TrayIcon:
 
     def _run(self) -> None:
         self._icon = pystray.Icon(
-            name="frc-obs-bridge",
+            name="ravenlink",
             icon=_make_icon(self._color),
             title=self._tooltip,
             menu=pystray.Menu(
@@ -86,7 +86,7 @@ class TrayIcon:
             parts.append(f"{status.entries_written:,} entries")
         if status.obs_recording:
             parts.append("REC")
-        self._tooltip = f"FRC Bridge: {' | '.join(parts)}"
+        self._tooltip = f"RavenLink: {' | '.join(parts)}"
         self._status_text = f"State: {status.match_state}"
         self._nt_text = f"NT: {'Connected' if status.nt_connected else 'Disconnected'}"
         self._obs_text = f"OBS: {'Connected' if status.obs_connected else 'Disconnected'}"

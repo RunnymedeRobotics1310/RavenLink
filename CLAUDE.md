@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-FRC OBS Bridge + NT Data Collector — a Python app for the Driver Station laptop that:
+RavenLink — FRC robot data bridge for the Driver Station laptop that:
 1. Auto-starts/stops OBS Studio recording based on FRC match state
 2. Subscribes to configurable NetworkTables paths and logs all value changes to JSONL files
 3. Uploads telemetry data to RavenBrain via a store-and-forward system
@@ -35,7 +35,7 @@ pytest tests/test_uploader.py::TestUploaderFileManagement
 # Build single-file Windows exe
 pip install pyinstaller
 pyinstaller build.spec
-# Output: dist/frc-obs-bridge.exe
+# Output: dist/ravenlink.exe
 ```
 
 ## Architecture

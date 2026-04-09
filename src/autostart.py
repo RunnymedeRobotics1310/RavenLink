@@ -7,8 +7,8 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_APP_NAME = "FRC-OBS-Bridge"
-_PLIST_LABEL = "ca.team1310.frc-obs-bridge"
+_APP_NAME = "RavenLink"
+_PLIST_LABEL = "ca.team1310.ravenlink"
 
 
 class AutoStart:

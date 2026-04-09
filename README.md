@@ -1,4 +1,4 @@
-# FRC OBS Bridge + NT Data Collector
+# RavenLink
 
 Automatically starts and stops OBS Studio recording based on FRC match state, **and** captures all NetworkTables data for post-match analysis. Runs on the Driver Station laptop, reads match status from the robot via NetworkTables, controls OBS via its WebSocket API, and uploads telemetry to RavenBrain.
 
@@ -33,7 +33,7 @@ When the FMS enables your robot for a match, recording starts and NT data loggin
 ### From the `.exe`
 
 ```
-frc-obs-bridge.exe --team 1310
+ravenlink.exe --team 1310
 ```
 
 ### From source
@@ -164,8 +164,8 @@ Open a Command Prompt or PowerShell:
 
 ```powershell
 # Clone the repo (or copy the folder to the DS laptop)
-git clone https://github.com/RunnymedeRobotics1310/AutoOBS.git
-cd AutoOBS
+git clone https://github.com/RunnymedeRobotics1310/RavenLink.git
+cd RavenLink
 
 # Create a virtual environment
 python -m venv venv
@@ -178,12 +178,12 @@ pip install pyinstaller
 # Build single-file exe
 pyinstaller build.spec
 
-# Output: dist\frc-obs-bridge.exe
+# Output: dist\ravenlink.exe
 ```
 
 ### Deploy to the Driver Station Laptop
 
-1. Copy `dist\frc-obs-bridge.exe` to a permanent location (e.g., `C:\FRC\frc-obs-bridge\`)
+1. Copy `dist\ravenlink.exe` to a permanent location (e.g., `C:\FRC\ravenlink\`)
 2. Create a `config.ini` in the same folder:
 
 ```ini
@@ -210,8 +210,8 @@ port = 8080
 3. Run it once to verify and register auto-start:
 
 ```powershell
-cd C:\FRC\frc-obs-bridge
-.\frc-obs-bridge.exe --team 1310
+cd C:\FRC\ravenlink
+.\ravenlink.exe --team 1310
 ```
 
 4. The bridge will:
@@ -237,7 +237,7 @@ cd C:\FRC\frc-obs-bridge
 If you prefer not to build:
 
 ```powershell
-cd AutoOBS
+cd RavenLink
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
@@ -247,12 +247,12 @@ python -m src.main --team 1310
 ### Updating
 
 ```powershell
-cd AutoOBS
+cd RavenLink
 git pull
 venv\Scripts\activate
 pip install -r requirements.txt
 pyinstaller build.spec
-# Copy dist\frc-obs-bridge.exe to your deployment folder
+# Copy dist\ravenlink.exe to your deployment folder
 ```
 
 ## License

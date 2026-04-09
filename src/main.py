@@ -1,4 +1,4 @@
-"""FRC OBS Recording Bridge — entry point and main loop."""
+"""RavenLink — entry point and main loop."""
 
 import logging
 import signal
@@ -14,12 +14,12 @@ from .obs_client import OBSClient
 from .state_machine import Action, MatchStateMachine, State
 from .uploader import Uploader
 
-log = logging.getLogger("frc_obs_bridge")
+log = logging.getLogger("ravenlink")
 
 BANNER = r"""
 ╔══════════════════════════════════════╗
-║   FRC OBS Recording Bridge v2.0.0   ║
-║   + NT Data Collection & Upload     ║
+║        RavenLink v2.0.0             ║
+║   FRC Robot Data Bridge for 1310    ║
 ╚══════════════════════════════════════╝
 """
 

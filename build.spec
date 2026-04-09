@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for frc-obs-bridge
+# PyInstaller spec for ravenlink
 # Build with: pyinstaller build.spec
 
 a = Analysis(
@@ -23,7 +23,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='frc-obs-bridge',
+    name='ravenlink',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
