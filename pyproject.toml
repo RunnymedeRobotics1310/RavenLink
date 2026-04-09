@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "ravenlink"
-version = "2.0.0"
+version = "0.1.0"
 description = "FRC robot data bridge — NT telemetry collection, OBS recording, and RavenBrain upload"
 requires-python = ">=3.11"
 dependencies = [

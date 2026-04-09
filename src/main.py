@@ -18,7 +18,7 @@ log = logging.getLogger("ravenlink")
 
 BANNER = r"""
 ╔══════════════════════════════════════╗
-║        RavenLink v2.0.0             ║
+║        RavenLink v0.1.0             ║
 ║   FRC Robot Data Bridge for 1310    ║
 ╚══════════════════════════════════════╝
 """
