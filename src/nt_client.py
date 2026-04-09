@@ -91,6 +91,10 @@ class NTClient:
 
         return FMSState.from_raw(raw)
 
+    @property
+    def instance(self) -> ntcore.NetworkTableInstance:
+        return self._inst
+
     def close(self) -> None:
         log.info("Shutting down NT client")
         self._inst.stopClient()

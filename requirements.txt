@@ -1,2 +1,6 @@
 pyntcore
 obsws-python
+requests
+flask
+pystray
+Pillow

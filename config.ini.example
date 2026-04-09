@@ -4,5 +4,23 @@ obs_host = localhost
 obs_port = 4455
 obs_password =
 stop_delay = 10
-poll_interval = 1.0
+poll_interval = 0.05
 log_level = INFO
+auto_teleop_gap = 5
+nt_disconnect_grace = 15
+launch_on_login = true
+
+[telemetry]
+nt_paths = /SmartDashboard/, /Shuffleboard/
+data_dir = ./data
+retention_days = 30
+
+[ravenbrain]
+url =
+api_key =
+batch_size = 500
+upload_interval = 10
+
+[dashboard]
+enabled = true
+port = 8080
