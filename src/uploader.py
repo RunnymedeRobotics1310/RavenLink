@@ -56,31 +56,26 @@ class Uploader:
 
         now = time.monotonic()
 
-        # Respect upload interval
         if now - self._last_upload_time < self._upload_interval:
             return
 
-        # Respect backoff
         if now < self._backoff_until:
             return
 
         self._last_upload_time = now
 
-        # Scan for pending files
         pending = self._get_pending_files(active_session_id)
         self.files_pending = len(pending)
 
         if not pending:
             return
 
-        # Upload oldest file first (already sorted by _get_pending_files)
         filepath = pending[0]
         self.currently_uploading = True
         try:
             success = self._upload_file(filepath)
             if success:
                 self._move_to_uploaded(filepath)
-                self._delete_progress(filepath)
                 self.files_uploaded += 1
                 self.files_pending = max(0, self.files_pending - 1)
                 self.last_upload_result = f"OK: {filepath.name}"
@@ -104,10 +99,6 @@ class Uploader:
             if f.stat().st_mtime < cutoff:
                 log.info("Pruning old upload: %s", f.name)
                 f.unlink()
-                # Also remove any stale progress file
-                progress = f.with_suffix(f.suffix + ".progress")
-                if progress.exists():
-                    progress.unlink()
 
     def _get_pending_files(self, active_session_id: str | None) -> list[Path]:
         """Return pending JSONL files sorted oldest-first, excluding the active session."""
@@ -121,35 +112,35 @@ class Uploader:
         lines = filepath.read_text().splitlines()
         if not lines:
             log.warning("Empty JSONL file: %s", filepath.name)
-            return True  # Nothing to upload, treat as success
+            return True
 
         # Parse session_start line
         session_meta = self._parse_session_start(lines)
         if session_meta is None:
             log.warning("No session_start found in %s — skipping", filepath.name)
-            return True  # Can't upload, move along
+            return True
 
         session_id = session_meta["session_id"]
 
-        # Load progress (how many lines already uploaded)
-        uploaded_lines = self._read_progress(filepath)
+        # Step 1: Create or get session (idempotent — safe to call on every retry)
+        ok = self._post_json(
+            "/api/telemetry/session",
+            {
+                "sessionId": session_id,
+                "teamNumber": session_meta.get("team", 0),
+                "robotIp": session_meta.get("robot_ip", ""),
+                "startedAt": session_meta.get("ts", ""),
+            },
+        )
+        if not ok:
+            return False
 
-        # Step 1: Create session (only if starting fresh)
-        if uploaded_lines == 0:
-            ok = self._post_json(
-                f"/api/telemetry/session",
-                {
-                    "sessionId": session_id,
-                    "teamNumber": session_meta.get("team", 0),
-                    "robotIp": session_meta.get("robot_ip", ""),
-                    "startedAt": session_meta.get("ts", ""),
-                },
-            )
-            if not ok:
-                return False
+        # Step 2: Ask server how many entries it already has
+        server_count = self._get_uploaded_count(session_id)
+        if server_count is None:
+            return False  # network error, retry later
 
-        # Step 2: Upload data entries in batches
-        # Collect all data entries (skip session_start, session_end, match markers are data)
+        # Collect all data entries (skip session_start)
         entries: list[dict] = []
         for line in lines:
             line = line.strip()
@@ -160,30 +151,29 @@ class Uploader:
             except json.JSONDecodeError:
                 log.warning("Skipping malformed JSONL line in %s: %.80s", filepath.name, line)
                 continue
-            entry_type = entry.get("type", "")
-            if entry_type == "session_start":
-                continue  # Already handled
+            if entry.get("type") == "session_start":
+                continue
             entries.append(entry)
 
-        # Skip already-uploaded entries
-        remaining = entries[uploaded_lines:]
-        total_uploaded = uploaded_lines
-
-        for i in range(0, len(remaining), self._batch_size):
-            batch = remaining[i : i + self._batch_size]
-            ok = self._post_json(
-                f"/api/telemetry/session/{session_id}/data",
-                batch,
+        # Step 3: Skip entries the server already has, upload remaining
+        remaining = entries[server_count:]
+        if not remaining:
+            log.info("Server already has all %d entries for %s", server_count, session_id)
+        else:
+            log.info(
+                "Server has %d/%d entries for %s, uploading %d remaining",
+                server_count, len(entries), session_id, len(remaining),
             )
-            if not ok:
-                # Save progress so we can resume
-                self._write_progress(filepath, total_uploaded)
-                return False
-            total_uploaded += len(batch)
-            self._write_progress(filepath, total_uploaded)
+            for i in range(0, len(remaining), self._batch_size):
+                batch = remaining[i : i + self._batch_size]
+                ok = self._post_json(
+                    f"/api/telemetry/session/{session_id}/data",
+                    batch,
+                )
+                if not ok:
+                    return False
 
-        # Step 3: Complete the session
-        # Find session_end timestamp
+        # Step 4: Complete the session
         ended_at = ""
         for line in reversed(lines):
             line = line.strip()
@@ -191,32 +181,18 @@ class Uploader:
                 continue
             try:
                 entry = json.loads(line)
-                if entry.get("type") == "session_end":
-                    ended_at = entry.get("ts", "")
+                ts = entry.get("ts", "")
+                if ts:
+                    ended_at = ts
                     break
             except json.JSONDecodeError:
                 continue
-
-        # If no session_end marker, use the last entry's timestamp
-        if not ended_at:
-            for line in reversed(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                    ended_at = entry.get("ts", "")
-                    if ended_at:
-                        break
-                except json.JSONDecodeError:
-                    continue
 
         ok = self._post_json(
             f"/api/telemetry/session/{session_id}/complete",
             {"endedAt": ended_at, "entryCount": len(entries)},
         )
         if not ok:
-            self._write_progress(filepath, total_uploaded)
             return False
 
         return True
@@ -234,6 +210,13 @@ class Uploader:
             except json.JSONDecodeError:
                 continue
         return None
+
+    def _get_uploaded_count(self, session_id: str) -> int | None:
+        """Query server for how many entries it has for this session. Returns None on error."""
+        result = self._get_json(f"/api/telemetry/session/{session_id}")
+        if result is None:
+            return None
+        return result.get("uploadedCount", 0)
 
     def _post_json(self, path: str, payload: dict | list) -> bool:
         """POST JSON to RavenBrain. Returns True on success (2xx)."""
@@ -265,39 +248,25 @@ class Uploader:
             self.last_upload_result = f"Connection error: {e}"
             return False
 
+    def _get_json(self, path: str) -> dict | None:
+        """GET JSON from RavenBrain. Returns parsed dict on success, None on failure."""
+        url = self._url + path
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={"X-Telemetry-Key": self._api_key},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+            log.warning("RavenBrain GET error for %s: %s", path, e)
+            self.last_upload_result = f"GET error: {e}"
+            return None
+
     def _move_to_uploaded(self, filepath: Path) -> None:
         dest = self._uploaded_dir / filepath.name
         shutil.move(str(filepath), str(dest))
-
-    def _read_progress(self, filepath: Path) -> int:
-        """Read how many data lines have been uploaded for this file."""
-        progress_file = filepath.with_suffix(filepath.suffix + ".progress")
-        if not progress_file.exists():
-            return 0
-        try:
-            text = progress_file.read_text().strip()
-            for line in text.splitlines():
-                if line.startswith("uploaded_lines="):
-                    return int(line.split("=", 1)[1])
-        except (ValueError, OSError):
-            pass
-        return 0
-
-    def _write_progress(self, filepath: Path, uploaded_lines: int) -> None:
-        progress_file = filepath.with_suffix(filepath.suffix + ".progress")
-        progress_file.write_text(f"uploaded_lines={uploaded_lines}\n")
-
-    def _delete_progress(self, filepath: Path) -> None:
-        """Delete the progress file after successful upload."""
-        # The file has been moved, so check both locations
-        for directory in (self._pending_dir, self._uploaded_dir):
-            progress = (directory / filepath.name).with_suffix(filepath.suffix + ".progress")
-            if progress.exists():
-                progress.unlink()
-        # Also check the original path's progress
-        progress = filepath.with_suffix(filepath.suffix + ".progress")
-        if progress.exists():
-            progress.unlink()
 
     def _apply_backoff(self) -> None:
         if self._backoff == 0.0:
