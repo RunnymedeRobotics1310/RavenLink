@@ -20,6 +20,7 @@ class Config:
     log_level: str = "INFO"
     auto_teleop_gap: float = 5.0
     nt_disconnect_grace: float = 15.0
+    record_trigger: str = "fms"
     launch_on_login: bool = True
 
     # Telemetry
@@ -75,6 +76,7 @@ class Config:
             _reload_float(self, bridge, "auto_teleop_gap", changed)
             _reload_float(self, bridge, "nt_disconnect_grace", changed)
             _reload_str(self, bridge, "log_level", changed)
+            _reload_str(self, bridge, "record_trigger", changed)
             _reload_bool(self, bridge, "launch_on_login", changed)
 
         if cp.has_section("telemetry"):
@@ -107,6 +109,7 @@ class Config:
             "log_level": self.log_level,
             "auto_teleop_gap": str(self.auto_teleop_gap),
             "nt_disconnect_grace": str(self.nt_disconnect_grace),
+            "record_trigger": self.record_trigger,
             "launch_on_login": str(self.launch_on_login).lower(),
         }
         cp["telemetry"] = {
@@ -235,6 +238,12 @@ def load_config() -> Config:
         help="Grace period in seconds before treating NT disconnect as match over (default: 15)",
     )
     parser.add_argument(
+        "--record-trigger",
+        default=ini_defaults.get("record_trigger", "fms"),
+        choices=["fms", "auto", "any"],
+        help="When to start recording: fms (competition only), auto (auto mode enable), any (any enable) (default: fms)",
+    )
+    parser.add_argument(
         "--no-launch-on-login", action="store_true",
         default=False,
         help="Disable launch-on-login registration",
@@ -289,6 +298,7 @@ def load_config() -> Config:
         log_level=args.log_level,
         auto_teleop_gap=args.auto_teleop_gap,
         nt_disconnect_grace=args.nt_disconnect_grace,
+        record_trigger=args.record_trigger,
         launch_on_login=launch_on_login_ini and not args.no_launch_on_login,
         nt_paths=nt_paths,
         data_dir=Path(args.data_dir),

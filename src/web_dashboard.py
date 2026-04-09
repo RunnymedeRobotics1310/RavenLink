@@ -124,13 +124,13 @@ const FIELD_DESCS = {
   team:'Team number',obs_host:'OBS host',obs_port:'OBS port',obs_password:'OBS password',
   stop_delay:'Stop delay (s)',poll_interval:'Poll interval (s)',log_level:'Log level',
   auto_teleop_gap:'Auto-teleop gap (s)',nt_disconnect_grace:'NT disconnect grace (s)',
-  launch_on_login:'Launch on login',nt_paths:'NT path prefixes',data_dir:'Data directory',
+  record_trigger:'Record trigger',launch_on_login:'Launch on login',nt_paths:'NT path prefixes',data_dir:'Data directory',
   retention_days:'Retention (days)',ravenbrain_url:'RavenBrain URL',ravenbrain_api_key:'API key',
   ravenbrain_batch_size:'Batch size',ravenbrain_upload_interval:'Upload interval (s)',
   dashboard_enabled:'Dashboard enabled',dashboard_port:'Dashboard port'
 };
 const SENSITIVE = new Set(['obs_password','ravenbrain_api_key']);
-const SECTIONS = {bridge:['team','obs_host','obs_port','obs_password','stop_delay','poll_interval','log_level','auto_teleop_gap','nt_disconnect_grace','launch_on_login'],
+const SECTIONS = {bridge:['team','obs_host','obs_port','obs_password','stop_delay','poll_interval','log_level','auto_teleop_gap','nt_disconnect_grace','record_trigger','launch_on_login'],
   telemetry:['nt_paths','data_dir','retention_days'],
   ravenbrain:['ravenbrain_url','ravenbrain_api_key','ravenbrain_batch_size','ravenbrain_upload_interval'],
   dashboard:['dashboard_enabled','dashboard_port']};
@@ -194,6 +194,11 @@ function loadConfig(){
           const sel=document.createElement('select');
           sel.name=f;
           sel.innerHTML='<option value="true"'+(val?' selected':'')+'>true</option><option value="false"'+(!val?' selected':'')+'>false</option>';
+          fd.appendChild(sel);
+        }else if(f==='record_trigger'){
+          const sel=document.createElement('select');
+          sel.name=f;
+          [['fms','FMS only (competition)'],['auto','Auto mode (practice + competition)'],['any','Any enable']].forEach(([v,l])=>{sel.innerHTML+='<option value="'+v+'"'+(v===val?' selected':'')+'>'+l+'</option>';});
           fd.appendChild(sel);
         }else if(f==='log_level'){
           const sel=document.createElement('select');
@@ -286,6 +291,7 @@ class WebDashboard:
                 "log_level": cfg.log_level,
                 "auto_teleop_gap": cfg.auto_teleop_gap,
                 "nt_disconnect_grace": cfg.nt_disconnect_grace,
+                "record_trigger": cfg.record_trigger,
                 "launch_on_login": cfg.launch_on_login,
                 "nt_paths": ", ".join(cfg.nt_paths),
                 "data_dir": str(cfg.data_dir),
@@ -322,6 +328,8 @@ class WebDashboard:
                     cfg.auto_teleop_gap = float(val)
                 elif key == "nt_disconnect_grace":
                     cfg.nt_disconnect_grace = float(val)
+                elif key == "record_trigger":
+                    cfg.record_trigger = val
                 elif key == "launch_on_login":
                     cfg.launch_on_login = val.lower() in ("true", "1", "yes") if isinstance(val, str) else bool(val)
                 elif key == "nt_paths":

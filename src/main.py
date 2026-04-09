@@ -64,7 +64,7 @@ def run(config: Config) -> None:
     log.info("Team: %d | Robot IP: %s", config.team, config.robot_ip)
     log.info("OBS: %s:%d | Stop delay: %.1fs | Poll: %.2fs",
              config.obs_host, config.obs_port, config.stop_delay, config.poll_interval)
-    log.info("NT paths: %s", ", ".join(config.nt_paths))
+    log.info("Record trigger: %s | NT paths: %s", config.record_trigger, ", ".join(config.nt_paths))
     log.info("Data dir: %s", config.data_dir)
     if config.ravenbrain_url:
         log.info("RavenBrain: %s", config.ravenbrain_url)
@@ -81,6 +81,7 @@ def run(config: Config) -> None:
         stop_delay=config.stop_delay,
         auto_teleop_gap=config.auto_teleop_gap,
         nt_disconnect_grace=config.nt_disconnect_grace,
+        record_trigger=config.record_trigger,
     )
 
     # NT data logging
@@ -160,6 +161,7 @@ def run(config: Config) -> None:
             if config.consume_changed():
                 log.info("Config reloaded")
                 nt_logger.update_paths(config.nt_paths)
+                sm._record_trigger = config.record_trigger
                 uploader._upload_interval = config.ravenbrain_upload_interval
                 uploader._batch_size = config.ravenbrain_batch_size
                 AutoStart.sync(config.launch_on_login)

@@ -8,6 +8,7 @@ poll_interval = 0.05
 log_level = INFO
 auto_teleop_gap = 5
 nt_disconnect_grace = 15
+record_trigger = fms
 launch_on_login = true
 
 [telemetry]
