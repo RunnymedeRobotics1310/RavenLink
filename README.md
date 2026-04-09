@@ -150,13 +150,109 @@ Access at `http://localhost:8080` when the bridge is running:
 - Verify the API key is correct
 - Check the dashboard upload status for error messages
 
-## Building from Source
+## Building & Deploying on Windows
 
-```bash
+### Prerequisites
+
+1. Install **Python 3.11+** from [python.org](https://www.python.org/downloads/) — check "Add Python to PATH" during install
+2. Install **OBS Studio 28+** from [obsproject.com](https://obsproject.com/)
+3. Install **Git** from [git-scm.com](https://git-scm.com/) (optional, for cloning the repo)
+
+### Build the `.exe`
+
+Open a Command Prompt or PowerShell:
+
+```powershell
+# Clone the repo (or copy the folder to the DS laptop)
+git clone https://github.com/RunnymedeRobotics1310/AutoOBS.git
+cd AutoOBS
+
+# Create a virtual environment
+python -m venv venv
+venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt
 pip install pyinstaller
+
+# Build single-file exe
 pyinstaller build.spec
-# Output: dist/frc-obs-bridge.exe
+
+# Output: dist\frc-obs-bridge.exe
+```
+
+### Deploy to the Driver Station Laptop
+
+1. Copy `dist\frc-obs-bridge.exe` to a permanent location (e.g., `C:\FRC\frc-obs-bridge\`)
+2. Create a `config.ini` in the same folder:
+
+```ini
+[bridge]
+team = 1310
+obs_host = localhost
+obs_port = 4455
+obs_password =
+launch_on_login = true
+
+[telemetry]
+nt_paths = /SmartDashboard/, /Shuffleboard/
+data_dir = ./data
+
+[ravenbrain]
+url = https://ravenbrain.team1310.ca
+api_key = your-api-key-here
+
+[dashboard]
+enabled = true
+port = 8080
+```
+
+3. Run it once to verify and register auto-start:
+
+```powershell
+cd C:\FRC\frc-obs-bridge
+.\frc-obs-bridge.exe --team 1310
+```
+
+4. The bridge will:
+   - Register itself to launch on login (via Windows Registry `HKCU\...\Run`)
+   - Start the web dashboard at `http://localhost:8080`
+   - Show a system tray icon (green/yellow/red)
+   - Begin capturing NT data when the robot connects
+
+### Competition Day Checklist
+
+1. Turn on the DS laptop — the bridge starts automatically (system tray icon appears)
+2. Open OBS Studio — ensure WebSocket server is enabled
+3. Verify via the dashboard (`http://localhost:8080`):
+   - NT: Connected (when robot is on)
+   - OBS: Connected
+4. The bridge handles everything else automatically:
+   - Starts/stops OBS recording per match
+   - Logs all NT data to local JSONL files
+   - Uploads to RavenBrain when WiFi is available (pit, hotel, etc.)
+
+### Running from Source (without building `.exe`)
+
+If you prefer not to build:
+
+```powershell
+cd AutoOBS
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+python -m src.main --team 1310
+```
+
+### Updating
+
+```powershell
+cd AutoOBS
+git pull
+venv\Scripts\activate
+pip install -r requirements.txt
+pyinstaller build.spec
+# Copy dist\frc-obs-bridge.exe to your deployment folder
 ```
 
 ## License
