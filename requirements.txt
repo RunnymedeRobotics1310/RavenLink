@@ -1,0 +1,2 @@
+pyntcore
+obsws-python

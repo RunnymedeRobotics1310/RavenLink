@@ -1,0 +1,8 @@
+[bridge]
+team = 1310
+obs_host = localhost
+obs_port = 4455
+obs_password =
+stop_delay = 10
+poll_interval = 1.0
+log_level = INFO

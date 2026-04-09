@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "frc-obs-bridge"
+version = "1.0.0"
+description = "Automatically start/stop OBS recording based on FRC match state"
+requires-python = ">=3.11"
+dependencies = [
+    "pyntcore",
+    "obsws-python",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyinstaller",
+    "pytest",
+]
+
+[project.scripts]
+frc-obs-bridge = "src.main:main"
