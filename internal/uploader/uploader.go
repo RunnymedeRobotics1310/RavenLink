@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,6 +30,15 @@ type Uploader struct {
 	batchSize      int
 	uploadInterval time.Duration
 
+	// httpClient is reused across all HTTP requests so connections can
+	// be kept alive. It is safe for concurrent use.
+	httpClient *http.Client
+
+	// activeSessionFn returns the ID of the session file currently being
+	// written (if any). Files containing this ID are skipped so that a
+	// mid-match file is not uploaded before it is complete. May be nil.
+	activeSessionFn func() string
+
 	pendingDir  string
 	uploadedDir string
 
@@ -47,8 +57,17 @@ type Uploader struct {
 }
 
 // New creates an Uploader. dataDir must contain pending/ and uploaded/
-// subdirectories (they are created if missing).
-func New(dataDir string, auth *Auth, batchSize int, uploadInterval time.Duration) *Uploader {
+// subdirectories (they are created if missing). activeSessionFn, if
+// non-nil, is called by the upload loop to determine which pending file
+// is currently being written (so it can be skipped); pass nil in tests
+// or when no session is ever active.
+func New(
+	dataDir string,
+	auth *Auth,
+	batchSize int,
+	uploadInterval time.Duration,
+	activeSessionFn func() string,
+) *Uploader {
 	pendingDir := filepath.Join(dataDir, "pending")
 	uploadedDir := filepath.Join(dataDir, "uploaded")
 
@@ -59,17 +78,29 @@ func New(dataDir string, auth *Auth, batchSize int, uploadInterval time.Duration
 	}
 
 	return &Uploader{
-		dataDir:        dataDir,
-		auth:           auth,
-		batchSize:      batchSize,
-		uploadInterval: uploadInterval,
-		pendingDir:     pendingDir,
-		uploadedDir:    uploadedDir,
+		dataDir:         dataDir,
+		auth:            auth,
+		batchSize:       batchSize,
+		uploadInterval:  uploadInterval,
+		httpClient:      &http.Client{Timeout: 30 * time.Second},
+		activeSessionFn: activeSessionFn,
+		pendingDir:      pendingDir,
+		uploadedDir:     uploadedDir,
 	}
 }
 
+// currentActiveSessionID returns the currently-active session ID via
+// the configured callback, or "" if no callback was provided.
+func (u *Uploader) currentActiveSessionID() string {
+	if u.activeSessionFn == nil {
+		return ""
+	}
+	return u.activeSessionFn()
+}
+
 // Run starts the upload loop, checking for pending files on each tick.
-// It returns when ctx is cancelled.
+// It runs in its own goroutine so slow HTTP calls do not block the main
+// state-machine loop. It returns when ctx is cancelled.
 func (u *Uploader) Run(ctx context.Context) {
 	slog.Info("uploader: running", "dataDir", u.dataDir, "interval", u.uploadInterval)
 
@@ -82,7 +113,7 @@ func (u *Uploader) Run(ctx context.Context) {
 			slog.Info("uploader: shutting down")
 			return
 		case <-ticker.C:
-			u.MaybeUpload("")
+			u.MaybeUpload(u.currentActiveSessionID())
 		}
 	}
 }
@@ -403,30 +434,34 @@ func (u *Uploader) postJSON(path string, payload any) (bool, error) {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", authHeader)
 
-		client := &http.Client{Timeout: 30 * time.Second}
-		resp, err := client.Do(req)
+		resp, err := u.httpClient.Do(req)
 		if err != nil {
 			u.LastUploadResult = fmt.Sprintf("Connection error: %v", err)
 			return false, fmt.Errorf("POST %s: %w", path, err)
 		}
+		// Drain + close so the underlying connection can be reused
+		// by http.Client's keep-alive pool.
+		statusCode := resp.StatusCode
+		statusText := resp.Status
+		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 
-		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
+		if statusCode == http.StatusUnauthorized && attempt == 0 {
 			slog.Info("uploader: got 401, re-authenticating", "path", path)
 			u.auth.Invalidate()
 			continue
 		}
 
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			u.LastUploadResult = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, resp.Status)
+		if statusCode < 200 || statusCode >= 300 {
+			u.LastUploadResult = fmt.Sprintf("HTTP %d: %s", statusCode, statusText)
 			slog.Warn("uploader: server returned error",
-				"path", path, "status", resp.StatusCode)
+				"path", path, "status", statusCode)
 			return false, nil
 		}
 
 		return true, nil
 	}
-	return false, nil
+	return false, errors.New("postJSON: retry budget exhausted")
 }
 
 // getJSON sends a GET request and parses the JSON response body.
@@ -446,24 +481,26 @@ func (u *Uploader) getJSON(path string) (map[string]any, error) {
 		}
 		req.Header.Set("Authorization", authHeader)
 
-		client := &http.Client{Timeout: 30 * time.Second}
-		resp, err := client.Do(req)
+		resp, err := u.httpClient.Do(req)
 		if err != nil {
 			u.LastUploadResult = fmt.Sprintf("GET error: %v", err)
 			return nil, fmt.Errorf("GET %s: %w", path, err)
 		}
 
+		// Read, drain, and close the body in one shot so the connection
+		// can be reused by http.Client's keep-alive pool.
+		body, readErr := io.ReadAll(resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
 		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
-			resp.Body.Close()
 			slog.Info("uploader: got 401 on GET, re-authenticating", "path", path)
 			u.auth.Invalidate()
 			continue
 		}
 
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("read response body: %w", err)
+		if readErr != nil {
+			return nil, fmt.Errorf("read response body: %w", readErr)
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -480,7 +517,7 @@ func (u *Uploader) getJSON(path string) (map[string]any, error) {
 
 		return result, nil
 	}
-	return nil, nil
+	return nil, errors.New("getJSON: retry budget exhausted")
 }
 
 // moveToUploaded moves a file from pending/ to uploaded/.

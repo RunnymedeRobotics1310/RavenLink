@@ -2,7 +2,9 @@ package statemachine
 
 import (
 	"fmt"
-	"math"
+	"strings"
+
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/typeconv"
 )
 
 // FMSState represents the parsed FRC Driver Station / FMS control word.
@@ -72,13 +74,7 @@ func (s FMSState) String() string {
 
 	label := "NONE"
 	if len(flags) > 0 {
-		for i, f := range flags {
-			if i == 0 {
-				label = f
-			} else {
-				label += " | " + f
-			}
-		}
+		label = strings.Join(flags, " | ")
 	}
 	return fmt.Sprintf("FMSState(%s, raw=0x%02x)", label, s.Raw)
 }
@@ -102,32 +98,8 @@ func ExtractFMSState(values map[string]any) FMSState {
 	return FMSStateFromRaw(raw)
 }
 
-// toInt converts various numeric types to int.
+// toInt is a shim around typeconv.ToInt for backward compatibility with this
+// package's existing call sites. Use typeconv.ToInt directly in new code.
 func toInt(v any) (int, bool) {
-	switch n := v.(type) {
-	case int:
-		return n, true
-	case int8:
-		return int(n), true
-	case int16:
-		return int(n), true
-	case int32:
-		return int(n), true
-	case int64:
-		return int(n), true
-	case uint8:
-		return int(n), true
-	case uint16:
-		return int(n), true
-	case uint32:
-		return int(n), true
-	case uint64:
-		return int(n), true
-	case float32:
-		return int(math.Round(float64(n))), true
-	case float64:
-		return int(math.Round(n)), true
-	default:
-		return 0, false
-	}
+	return typeconv.ToInt(v)
 }

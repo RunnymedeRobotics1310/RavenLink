@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/statemachine"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/status"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/tray"
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/typeconv"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/uploader"
 )
 
@@ -103,6 +105,11 @@ func main() {
 	if err := obs.Connect(); err != nil {
 		slog.Warn("OBS connection failed — will retry", "err", err)
 	}
+	// Start the background health check. It pings OBS every 5 seconds with
+	// a per-call timeout and refreshes the cached IsConnected state; it
+	// also handles background reconnect attempts. The goroutine exits on
+	// ctx cancellation, so Close() below will not block.
+	obs.StartHealthCheck(ctx)
 	defer obs.Close()
 
 	// State machine
@@ -154,13 +161,28 @@ func main() {
 	}()
 
 	// Uploader + auth
+	if cfg.RavenBrain.URL != "" && !strings.HasPrefix(strings.ToLower(cfg.RavenBrain.URL), "https://") {
+		slog.Warn("!!! INSECURE ravenbrain_url: credentials will NOT be sent — configure https:// to enable upload",
+			"ravenbrain_url", cfg.RavenBrain.URL,
+		)
+	}
 	auth := uploader.NewAuth(cfg.RavenBrain.URL, cfg.RavenBrain.Username, cfg.RavenBrain.Password)
+	// The uploader runs in its own goroutine so its (potentially slow)
+	// HTTP calls never block the main state-machine loop. It consults
+	// ntLog.Stats().ActiveSessionID to avoid uploading the session file
+	// that is currently being written.
 	up := uploader.New(
 		cfg.Telemetry.DataDir,
 		auth,
 		cfg.RavenBrain.BatchSize,
 		time.Duration(cfg.RavenBrain.UploadInterval*float64(time.Second)),
+		func() string { return ntLog.Stats().ActiveSessionID },
 	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		up.Run(ctx)
+	}()
 
 	// Dashboard
 	var dash *dashboard.Server
@@ -242,8 +264,8 @@ func runMainLoop(
 	statusTicker := time.NewTicker(5 * time.Second)
 	defer statusTicker.Stop()
 
-	uploadTicker := time.NewTicker(time.Duration(cfg.RavenBrain.UploadInterval * float64(time.Second)))
-	defer uploadTicker.Stop()
+	// Uploads are driven by uploader.Run in its own goroutine (wired in
+	// main) so slow HTTP calls never block this state-machine loop.
 
 	rateTicker := time.NewTicker(1 * time.Second)
 	defer rateTicker.Stop()
@@ -252,6 +274,10 @@ func runMainLoop(
 	var fms statemachine.FMSState = statemachine.FMSStateDisconnected()
 	prevState := statemachine.Idle
 	lastEntries := 0
+	// Track NT connectivity transitions so we can drive session lifecycle.
+	// Start as "not yet connected" so the first observed true flips to
+	// StartSession.
+	prevNTConnected := false
 
 	for {
 		select {
@@ -270,13 +296,24 @@ func runMainLoop(
 				return
 			}
 			// Parse FMS state from topic value
-			if raw, ok := toInt(v.Value); ok {
+			if raw, ok := typeconv.ToInt(v.Value); ok {
 				fms = statemachine.FMSStateFromRaw(raw)
 			}
 
 		case <-ticker.C:
+			// Drive logger session lifecycle from NT connectivity edges.
+			ntConnected := nt.Connected()
+			if ntConnected && !prevNTConnected {
+				slog.Info("NT connected — starting telemetry session")
+				ntLog.StartSession()
+			} else if !ntConnected && prevNTConnected {
+				slog.Info("NT disconnected — ending telemetry session")
+				ntLog.EndSession()
+			}
+			prevNTConnected = ntConnected
+
 			// Update state machine
-			if !nt.Connected() {
+			if !ntConnected {
 				fms = statemachine.FMSStateDisconnected()
 			}
 			actions := sm.Update(fms)
@@ -305,12 +342,9 @@ func runMainLoop(
 				}
 			}
 
-		case <-uploadTicker.C:
-			up.MaybeUpload(ntLog.ActiveSessionID)
-
 		case <-rateTicker.C:
 			// Update entries-per-second gauge
-			entries := ntLog.EntriesWritten
+			entries := ntLog.Stats().EntriesWritten
 			rate := float64(entries - lastEntries)
 			lastEntries = entries
 			st.Update(func(s *status.Status) {
@@ -319,13 +353,14 @@ func runMainLoop(
 
 		case <-statusTicker.C:
 			// Periodic full status refresh
+			stats := ntLog.Stats()
 			st.Update(func(s *status.Status) {
 				s.NTConnected = nt.Connected()
 				s.OBSConnected = obs.IsConnected()
 				s.RavenBrainReachable = auth.IsConfigured()
 				s.MatchState = stateName(sm.State)
-				s.ActiveSessionFile = ntLog.ActiveSessionID
-				s.EntriesWritten = ntLog.EntriesWritten
+				s.ActiveSessionFile = stats.ActiveSessionID
+				s.EntriesWritten = stats.EntriesWritten
 				s.FilesPending = up.FilesPending
 				s.FilesUploaded = up.FilesUploaded
 				s.LastUploadResult = up.LastUploadResult
@@ -341,7 +376,7 @@ func runMainLoop(
 				"nt", nt.Connected(),
 				"fms", fmt.Sprintf("%v", fms),
 				"state", stateName(sm.State),
-				"entries", ntLog.EntriesWritten,
+				"entries", stats.EntriesWritten,
 				"pending", up.FilesPending,
 			)
 		}
@@ -360,35 +395,5 @@ func stateName(s statemachine.State) string {
 		return "STOP_PENDING"
 	}
 	return "UNKNOWN"
-}
-
-func toInt(v any) (int, bool) {
-	switch n := v.(type) {
-	case int:
-		return n, true
-	case int8:
-		return int(n), true
-	case int16:
-		return int(n), true
-	case int32:
-		return int(n), true
-	case int64:
-		return int(n), true
-	case uint:
-		return int(n), true
-	case uint8:
-		return int(n), true
-	case uint16:
-		return int(n), true
-	case uint32:
-		return int(n), true
-	case uint64:
-		return int(n), true
-	case float32:
-		return int(n), true
-	case float64:
-		return int(n), true
-	}
-	return 0, false
 }
 

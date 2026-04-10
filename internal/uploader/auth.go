@@ -80,6 +80,11 @@ func (a *Auth) login() error {
 		return fmt.Errorf("ravenbrain credentials not configured")
 	}
 
+	// Refuse to send credentials over plaintext HTTP.
+	if !strings.HasPrefix(strings.ToLower(a.baseURL), "https://") {
+		return fmt.Errorf("ravenbrain_url must use https:// scheme (got %q) — refusing to send credentials over plaintext", a.baseURL)
+	}
+
 	url := a.baseURL + "/login"
 	payload, err := json.Marshal(map[string]string{
 		"username": a.username,

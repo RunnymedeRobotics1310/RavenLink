@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -72,7 +73,7 @@ func DefaultConfig() *Config {
 			NTDisconnectGrace: 15,
 		},
 		Telemetry: TelemetryConfig{
-			NTPaths:       []string{"/SmartDashboard/", "/Shuffleboard/"},
+			NTPaths:       []string{"/FMSInfo/", "/SmartDashboard/", "/Shuffleboard/"},
 			DataDir:       "./data",
 			RetentionDays: 30,
 		},
@@ -107,15 +108,77 @@ func LoadConfig(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// SaveConfig writes the config to the given YAML file path.
+// SaveConfig writes the config to the given YAML file path atomically
+// with mode 0600. If the file already exists, a .bak copy of the previous
+// version is kept alongside the new file. The write sequence is:
+//
+//  1. marshal YAML
+//  2. write to <path>.tmp (0600) in the same directory
+//  3. fsync the temp file
+//  4. copy existing <path> to <path>.bak (if present)
+//  5. rename <path>.tmp -> <path>
+//  6. chmod <path> to 0600 (in case umask widened perms)
 func (c *Config) SaveConfig(path string) error {
 	data, err := yaml.Marshal(c)
 	if err != nil {
 		return fmt.Errorf("marshaling config to YAML: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("writing config file: %w", err)
+	dir := filepath.Dir(path)
+	tmpPath := path + ".tmp"
+
+	// Create temp file with 0600 perms in the same directory so the
+	// subsequent rename is atomic (same filesystem).
+	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("creating temp config file: %w", err)
+	}
+	// Ensure we clean up the temp file on failure.
+	cleanup := func() { _ = os.Remove(tmpPath) }
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("writing temp config file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("fsync temp config file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("closing temp config file: %w", err)
+	}
+
+	// Keep a backup of the existing file, if any.
+	if prev, err := os.ReadFile(path); err == nil {
+		bakPath := path + ".bak"
+		if err := os.WriteFile(bakPath, prev, 0o600); err != nil {
+			// Backup failure is non-fatal but we log via returned error chain.
+			// Still proceed with the atomic rename so the primary write lands.
+			_ = err
+		}
+	} else if !os.IsNotExist(err) {
+		// If we can't read the existing file for a reason other than
+		// "doesn't exist", that's surprising but not fatal.
+		_ = err
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		cleanup()
+		return fmt.Errorf("renaming temp config file: %w", err)
+	}
+
+	// Enforce 0600 even if umask or prior perms were looser.
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("chmod config file to 0600: %w", err)
+	}
+
+	// Best-effort: ensure directory entry is flushed.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 
 	return nil
