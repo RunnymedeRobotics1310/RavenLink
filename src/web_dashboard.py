@@ -125,14 +125,14 @@ const FIELD_DESCS = {
   stop_delay:'Stop delay (s)',poll_interval:'Poll interval (s)',log_level:'Log level',
   auto_teleop_gap:'Auto-teleop gap (s)',nt_disconnect_grace:'NT disconnect grace (s)',
   record_trigger:'Record trigger',launch_on_login:'Launch on login',nt_paths:'NT path prefixes',data_dir:'Data directory',
-  retention_days:'Retention (days)',ravenbrain_url:'RavenBrain URL',ravenbrain_api_key:'API key',
+  retention_days:'Retention (days)',ravenbrain_url:'RavenBrain URL',ravenbrain_username:'RavenBrain user',ravenbrain_password:'RavenBrain password',
   ravenbrain_batch_size:'Batch size',ravenbrain_upload_interval:'Upload interval (s)',
   dashboard_enabled:'Dashboard enabled',dashboard_port:'Dashboard port'
 };
-const SENSITIVE = new Set(['obs_password','ravenbrain_api_key']);
+const SENSITIVE = new Set(['obs_password','ravenbrain_password']);
 const SECTIONS = {bridge:['team','obs_host','obs_port','obs_password','stop_delay','poll_interval','log_level','auto_teleop_gap','nt_disconnect_grace','record_trigger','launch_on_login'],
   telemetry:['nt_paths','data_dir','retention_days'],
-  ravenbrain:['ravenbrain_url','ravenbrain_api_key','ravenbrain_batch_size','ravenbrain_upload_interval'],
+  ravenbrain:['ravenbrain_url','ravenbrain_username','ravenbrain_password','ravenbrain_batch_size','ravenbrain_upload_interval'],
   dashboard:['dashboard_enabled','dashboard_port']};
 
 // Tabs
@@ -297,7 +297,8 @@ class WebDashboard:
                 "data_dir": str(cfg.data_dir),
                 "retention_days": cfg.retention_days,
                 "ravenbrain_url": cfg.ravenbrain_url,
-                "ravenbrain_api_key": cfg.ravenbrain_api_key,
+                "ravenbrain_username": cfg.ravenbrain_username,
+                "ravenbrain_password": cfg.ravenbrain_password,
                 "ravenbrain_batch_size": cfg.ravenbrain_batch_size,
                 "ravenbrain_upload_interval": cfg.ravenbrain_upload_interval,
                 "dashboard_enabled": cfg.dashboard_enabled,
@@ -341,8 +342,10 @@ class WebDashboard:
                     cfg.retention_days = int(val)
                 elif key == "ravenbrain_url":
                     cfg.ravenbrain_url = val
-                elif key == "ravenbrain_api_key":
-                    cfg.ravenbrain_api_key = val
+                elif key == "ravenbrain_username":
+                    cfg.ravenbrain_username = val
+                elif key == "ravenbrain_password":
+                    cfg.ravenbrain_password = val
                 elif key == "ravenbrain_batch_size":
                     cfg.ravenbrain_batch_size = int(val)
                 elif key == "ravenbrain_upload_interval":

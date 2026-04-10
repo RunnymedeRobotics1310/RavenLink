@@ -9,6 +9,8 @@ from pathlib import Path
 import urllib.request
 import urllib.error
 
+from .ravenbrain_auth import AuthError, RavenBrainAuth
+
 log = logging.getLogger(__name__)
 
 MAX_BACKOFF = 60.0
@@ -21,14 +23,13 @@ class Uploader:
     def __init__(
         self,
         data_dir: Path,
-        ravenbrain_url: str,
-        api_key: str,
+        auth: RavenBrainAuth,
         batch_size: int = 500,
         upload_interval: float = 10.0,
     ) -> None:
         self._data_dir = data_dir
-        self._url = ravenbrain_url.rstrip("/") if ravenbrain_url else ""
-        self._api_key = api_key
+        self._auth = auth
+        self._url = auth._base_url
         self._batch_size = batch_size
         self._upload_interval = upload_interval
 
@@ -51,7 +52,7 @@ class Uploader:
 
     def maybe_upload(self, active_session_id: str | None = None) -> None:
         """Called from the main loop every cycle. Only does work every upload_interval seconds."""
-        if not self._url:
+        if not self._auth.is_configured:
             return
 
         now = time.monotonic()
@@ -219,50 +220,69 @@ class Uploader:
         return result.get("uploadedCount", 0)
 
     def _post_json(self, path: str, payload: dict | list) -> bool:
-        """POST JSON to RavenBrain. Returns True on success (2xx)."""
-        url = self._url + path
-        data = json.dumps(payload).encode("utf-8")
+        """POST JSON to RavenBrain with JWT auth. Retries once on 401."""
+        for attempt in range(2):
+            try:
+                headers = {"Content-Type": "application/json"}
+                headers.update(self._auth.get_auth_header())
+            except AuthError as e:
+                log.warning("Auth failed: %s", e)
+                self.last_upload_result = f"Auth error: {e}"
+                return False
 
-        req = urllib.request.Request(
-            url,
-            data=data,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "X-Telemetry-Key": self._api_key,
-            },
-        )
+            url = self._url + path
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data, method="POST", headers=headers)
 
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                if resp.status < 200 or resp.status >= 300:
-                    log.warning("RavenBrain returned %d for %s", resp.status, path)
-                    return False
-                return True
-        except urllib.error.HTTPError as e:
-            log.warning("RavenBrain HTTP %d for %s: %s", e.code, path, e.reason)
-            self.last_upload_result = f"HTTP {e.code}: {e.reason}"
-            return False
-        except (urllib.error.URLError, OSError) as e:
-            log.warning("RavenBrain connection error for %s: %s", path, e)
-            self.last_upload_result = f"Connection error: {e}"
-            return False
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    if resp.status < 200 or resp.status >= 300:
+                        log.warning("RavenBrain returned %d for %s", resp.status, path)
+                        return False
+                    return True
+            except urllib.error.HTTPError as e:
+                if e.code == 401 and attempt == 0:
+                    log.info("Got 401 for %s — re-authenticating", path)
+                    self._auth.invalidate()
+                    continue
+                log.warning("RavenBrain HTTP %d for %s: %s", e.code, path, e.reason)
+                self.last_upload_result = f"HTTP {e.code}: {e.reason}"
+                return False
+            except (urllib.error.URLError, OSError) as e:
+                log.warning("RavenBrain connection error for %s: %s", path, e)
+                self.last_upload_result = f"Connection error: {e}"
+                return False
+        return False
 
     def _get_json(self, path: str) -> dict | None:
-        """GET JSON from RavenBrain. Returns parsed dict on success, None on failure."""
-        url = self._url + path
-        req = urllib.request.Request(
-            url,
-            method="GET",
-            headers={"X-Telemetry-Key": self._api_key},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
-            log.warning("RavenBrain GET error for %s: %s", path, e)
-            self.last_upload_result = f"GET error: {e}"
-            return None
+        """GET JSON from RavenBrain with JWT auth. Retries once on 401."""
+        for attempt in range(2):
+            try:
+                headers = dict(self._auth.get_auth_header())
+            except AuthError as e:
+                log.warning("Auth failed: %s", e)
+                self.last_upload_result = f"Auth error: {e}"
+                return None
+
+            url = self._url + path
+            req = urllib.request.Request(url, method="GET", headers=headers)
+
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                if e.code == 401 and attempt == 0:
+                    log.info("Got 401 on GET %s — re-authenticating", path)
+                    self._auth.invalidate()
+                    continue
+                log.warning("RavenBrain GET HTTP %d for %s: %s", e.code, path, e.reason)
+                self.last_upload_result = f"GET HTTP {e.code}: {e.reason}"
+                return None
+            except (urllib.error.URLError, OSError) as e:
+                log.warning("RavenBrain GET error for %s: %s", path, e)
+                self.last_upload_result = f"GET error: {e}"
+                return None
+        return None
 
     def _move_to_uploaded(self, filepath: Path) -> None:
         dest = self._uploaded_dir / filepath.name

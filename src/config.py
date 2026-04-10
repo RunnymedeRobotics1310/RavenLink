@@ -30,7 +30,8 @@ class Config:
 
     # RavenBrain
     ravenbrain_url: str = ""
-    ravenbrain_api_key: str = ""
+    ravenbrain_username: str = ""
+    ravenbrain_password: str = ""
     ravenbrain_batch_size: int = 500
     ravenbrain_upload_interval: float = 10.0
 
@@ -119,7 +120,8 @@ class Config:
         }
         cp["ravenbrain"] = {
             "url": self.ravenbrain_url,
-            "api_key": self.ravenbrain_api_key,
+            "username": self.ravenbrain_username,
+            "password": self.ravenbrain_password,
             "batch_size": str(self.ravenbrain_batch_size),
             "upload_interval": str(self.ravenbrain_upload_interval),
         }
@@ -268,9 +270,14 @@ def load_config() -> Config:
         help="RavenBrain server URL (default: empty, local-only mode)",
     )
     parser.add_argument(
-        "--ravenbrain-api-key",
-        default=ini_ravenbrain.get("api_key", ""),
-        help="RavenBrain telemetry API key",
+        "--ravenbrain-username",
+        default=ini_ravenbrain.get("username", ""),
+        help="RavenBrain service account username (default: empty)",
+    )
+    parser.add_argument(
+        "--ravenbrain-password",
+        default=ini_ravenbrain.get("password", ""),
+        help="RavenBrain service account password (default: empty)",
     )
 
     # Dashboard args
@@ -304,7 +311,8 @@ def load_config() -> Config:
         data_dir=Path(args.data_dir),
         retention_days=int(ini_telemetry.get("retention_days", "30")),
         ravenbrain_url=args.ravenbrain_url,
-        ravenbrain_api_key=args.ravenbrain_api_key,
+        ravenbrain_username=args.ravenbrain_username,
+        ravenbrain_password=args.ravenbrain_password,
         ravenbrain_batch_size=int(ini_ravenbrain.get("batch_size", "500")),
         ravenbrain_upload_interval=float(ini_ravenbrain.get("upload_interval", "10")),
         dashboard_enabled=ini_dashboard.get("enabled", "true").lower() in ("true", "1", "yes"),

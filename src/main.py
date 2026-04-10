@@ -12,6 +12,7 @@ from .nt_client import NTClient
 from .nt_logger import NTLogger
 from .obs_client import OBSClient
 from .state_machine import Action, MatchStateMachine, State
+from .ravenbrain_auth import RavenBrainAuth
 from .uploader import Uploader
 
 log = logging.getLogger("ravenlink")
@@ -87,11 +88,11 @@ def run(config: Config) -> None:
     # NT data logging
     nt_logger = NTLogger(nt.instance, config.nt_paths, config.data_dir, config.team)
 
-    # Store-and-forward uploader
+    # RavenBrain auth + store-and-forward uploader
+    rb_auth = RavenBrainAuth(config.ravenbrain_url, config.ravenbrain_username, config.ravenbrain_password)
     uploader = Uploader(
         data_dir=config.data_dir,
-        ravenbrain_url=config.ravenbrain_url,
-        api_key=config.ravenbrain_api_key,
+        auth=rb_auth,
         batch_size=config.ravenbrain_batch_size,
         upload_interval=config.ravenbrain_upload_interval,
     )
