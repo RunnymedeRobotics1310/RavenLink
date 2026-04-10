@@ -69,7 +69,7 @@ class NTClient:
         self._robot_ip = f"10.{te}.{am}.2"
 
         self._inst = ntcore.NetworkTableInstance.create()
-        self._inst.startClient4("frc-obs-bridge")
+        self._inst.startClient4("ravenlink")
         self._inst.setServer(self._robot_ip, 5810)
 
         table = self._inst.getTable("FMSInfo")
@@ -90,6 +90,10 @@ class NTClient:
             return FMSState.disconnected()
 
         return FMSState.from_raw(raw)
+
+    @property
+    def instance(self) -> ntcore.NetworkTableInstance:
+        return self._inst
 
     def close(self) -> None:
         log.info("Shutting down NT client")

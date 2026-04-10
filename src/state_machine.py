@@ -32,11 +32,13 @@ class MatchStateMachine:
         stop_delay: float = 10.0,
         auto_teleop_gap: float = 5.0,
         nt_disconnect_grace: float = 15.0,
+        record_trigger: str = "fms",
         clock: Optional[Callable[[], float]] = None,
     ) -> None:
         self._stop_delay = stop_delay
         self._auto_teleop_gap = auto_teleop_gap
         self._nt_disconnect_grace = nt_disconnect_grace
+        self._record_trigger = record_trigger
         self._clock = clock or self._default_clock
 
         self.state = State.IDLE
@@ -52,6 +54,16 @@ class MatchStateMachine:
 
     def _now(self) -> float:
         return self._clock()
+
+    def _should_start_recording(self, fms: FMSState) -> bool:
+        if not fms.enabled:
+            return False
+        if self._record_trigger == "fms":
+            return fms.fms_attached
+        elif self._record_trigger == "auto":
+            return fms.auto_mode
+        else:  # "any"
+            return True
 
     def _reset(self) -> None:
         self.state = State.IDLE
@@ -80,8 +92,8 @@ class MatchStateMachine:
         # NT is connected — clear disconnect timer
         self._nt_disconnected_at = None
 
-        # --- Handle FMS detach while recording ---
-        if not fms.fms_attached and self.state != State.IDLE:
+        # --- Handle FMS detach while recording (only in fms trigger mode) ---
+        if self._record_trigger == "fms" and not fms.fms_attached and self.state != State.IDLE:
             if self.state != State.STOP_PENDING:
                 log.warning("FMS detached while in %s — stopping recording after 3s grace", self.state.name)
                 self.state = State.STOP_PENDING
@@ -97,9 +109,8 @@ class MatchStateMachine:
 
         # --- State transitions ---
         if self.state == State.IDLE:
-            # IDLE → RECORDING_AUTO: FMS attached + enabled
-            if fms.fms_attached and fms.enabled:
-                log.info("Match start detected (FMS attached + enabled) — starting recording")
+            if self._should_start_recording(fms):
+                log.info("Recording triggered (mode=%s) — starting recording", self._record_trigger)
                 self.state = State.RECORDING_AUTO
                 self._was_enabled = True
                 self._disabled_at = None
@@ -138,7 +149,7 @@ class MatchStateMachine:
 
         elif self.state == State.STOP_PENDING:
             # Re-enable cancels the stop
-            if fms.enabled and fms.fms_attached:
+            if self._should_start_recording(fms):
                 log.info("Re-enabled during STOP_PENDING — resuming recording")
                 if fms.auto_mode:
                     self.state = State.RECORDING_AUTO

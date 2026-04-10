@@ -3,13 +3,17 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
-name = "frc-obs-bridge"
-version = "1.0.0"
-description = "Automatically start/stop OBS recording based on FRC match state"
+name = "ravenlink"
+version = "0.1.0"
+description = "FRC robot data bridge — NT telemetry collection, OBS recording, and RavenBrain upload"
 requires-python = ">=3.11"
 dependencies = [
     "pyntcore",
     "obsws-python",
+    "requests",
+    "flask",
+    "pystray",
+    "Pillow",
 ]
 
 [project.optional-dependencies]
@@ -19,4 +23,4 @@ dev = [
 ]
 
 [project.scripts]
-frc-obs-bridge = "src.main:main"
+ravenlink = "src.main:main"

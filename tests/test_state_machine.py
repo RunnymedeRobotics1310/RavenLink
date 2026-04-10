@@ -385,3 +385,158 @@ class TestIdleIgnoresNonFMS:
         actions = sm.update(make_fms(enabled=False, fms=True, ds=True))
         assert actions == []
         assert sm.state == State.IDLE
+
+
+class TestRecordTriggerAuto:
+    """Test record_trigger='auto' — starts on auto+enabled without FMS."""
+
+    def test_auto_enabled_without_fms_starts_recording(self):
+        clock = FakeClock()
+        sm = MatchStateMachine(record_trigger="auto", clock=clock)
+
+        actions = sm.update(make_fms(enabled=True, auto=True, fms=False, ds=True))
+        assert actions == [Action.START_RECORD]
+        assert sm.state == State.RECORDING_AUTO
+
+    def test_teleop_enabled_without_fms_stays_idle(self):
+        """Auto trigger requires auto_mode — plain teleop enable doesn't trigger."""
+        clock = FakeClock()
+        sm = MatchStateMachine(record_trigger="auto", clock=clock)
+
+        actions = sm.update(make_fms(enabled=True, auto=False, fms=False, ds=True))
+        assert actions == []
+        assert sm.state == State.IDLE
+
+    def test_ds_practice_full_lifecycle(self):
+        """DS Practice button: auto → brief disable → teleop → disable → stop."""
+        clock = FakeClock()
+        sm = MatchStateMachine(record_trigger="auto", stop_delay=10.0, auto_teleop_gap=5.0, clock=clock)
+
+        # Auto start (no FMS)
+        actions = sm.update(make_fms(enabled=True, auto=True, fms=False, ds=True))
+        assert actions == [Action.START_RECORD]
+        assert sm.state == State.RECORDING_AUTO
+
+        # Auto runs
+        clock.advance(15.0)
+        sm.update(make_fms(enabled=True, auto=True, fms=False, ds=True))
+
+        # Brief disable between auto and teleop
+        clock.advance(0.1)
+        sm.update(make_fms(enabled=False, fms=False, ds=True))
+        assert sm.state == State.RECORDING_AUTO  # gap tolerated
+
+        # Teleop starts
+        clock.advance(1.0)
+        sm.update(make_fms(enabled=True, auto=False, fms=False, ds=True))
+        assert sm.state == State.RECORDING_TELEOP
+
+        # Teleop ends — disabled
+        clock.advance(120.0)
+        sm.update(make_fms(enabled=False, fms=False, ds=True))
+        assert sm.state == State.STOP_PENDING
+
+        # Stop delay
+        clock.advance(11.0)
+        actions = sm.update(make_fms(enabled=False, fms=False, ds=True))
+        assert actions == [Action.STOP_RECORD]
+        assert sm.state == State.IDLE
+
+    def test_fms_detach_does_not_fire_in_auto_mode(self):
+        """FMS detach handler should not fire when record_trigger != 'fms'."""
+        clock = FakeClock()
+        sm = MatchStateMachine(record_trigger="auto", clock=clock)
+
+        # Start in auto mode (no FMS)
+        sm.update(make_fms(enabled=True, auto=True, fms=False, ds=True))
+        assert sm.state == State.RECORDING_AUTO
+
+        # FMS is never attached, so "detach" shouldn't trigger stop
+        clock.advance(5.0)
+        sm.update(make_fms(enabled=True, auto=True, fms=False, ds=True))
+        assert sm.state == State.RECORDING_AUTO  # still recording, not stopped
+
+    def test_reenable_during_stop_pending(self):
+        clock = FakeClock()
+        sm = MatchStateMachine(record_trigger="auto", stop_delay=10.0, clock=clock)
+
+        # Start and get to STOP_PENDING
+        sm.update(make_fms(enabled=True, auto=True, fms=False, ds=True))
+        clock.advance(15.0)
+        sm.update(make_fms(enabled=False, fms=False, ds=True))
+        clock.advance(6.0)
+        sm.update(make_fms(enabled=False, fms=False, ds=True))
+        assert sm.state == State.STOP_PENDING
+
+        # Re-enable in auto mode cancels stop
+        clock.advance(1.0)
+        actions = sm.update(make_fms(enabled=True, auto=True, fms=False, ds=True))
+        assert actions == []
+        assert sm.state == State.RECORDING_AUTO
+
+
+class TestRecordTriggerAny:
+    """Test record_trigger='any' — starts on any enable."""
+
+    def test_teleop_enabled_without_fms_starts_recording(self):
+        clock = FakeClock()
+        sm = MatchStateMachine(record_trigger="any", clock=clock)
+
+        actions = sm.update(make_fms(enabled=True, auto=False, fms=False, ds=True))
+        assert actions == [Action.START_RECORD]
+        assert sm.state == State.RECORDING_AUTO
+
+    def test_disable_triggers_stop(self):
+        clock = FakeClock()
+        sm = MatchStateMachine(record_trigger="any", stop_delay=5.0, auto_teleop_gap=5.0, clock=clock)
+
+        sm.update(make_fms(enabled=True, fms=False, ds=True))
+        assert sm.state == State.RECORDING_AUTO
+
+        # Disable — enters gap timer, then STOP_PENDING
+        clock.advance(10.0)
+        sm.update(make_fms(enabled=False, fms=False, ds=True))
+        clock.advance(6.0)
+        sm.update(make_fms(enabled=False, fms=False, ds=True))
+        assert sm.state == State.STOP_PENDING
+
+        clock.advance(6.0)
+        actions = sm.update(make_fms(enabled=False, fms=False, ds=True))
+        assert actions == [Action.STOP_RECORD]
+        assert sm.state == State.IDLE
+
+    def test_reenable_during_stop_pending(self):
+        clock = FakeClock()
+        sm = MatchStateMachine(record_trigger="any", stop_delay=10.0, auto_teleop_gap=3.0, clock=clock)
+
+        sm.update(make_fms(enabled=True, fms=False, ds=True))
+        clock.advance(10.0)
+        sm.update(make_fms(enabled=False, fms=False, ds=True))
+        clock.advance(4.0)
+        sm.update(make_fms(enabled=False, fms=False, ds=True))
+        assert sm.state == State.STOP_PENDING
+
+        # Re-enable cancels stop
+        actions = sm.update(make_fms(enabled=True, fms=False, ds=True))
+        assert actions == []
+        assert sm.state == State.RECORDING_TELEOP
+
+
+class TestRecordTriggerFmsDefault:
+    """Verify record_trigger='fms' (default) preserves existing behavior."""
+
+    def test_enabled_without_fms_stays_idle(self):
+        clock = FakeClock()
+        sm = MatchStateMachine(record_trigger="fms", clock=clock)
+
+        actions = sm.update(make_fms(enabled=True, auto=True, fms=False, ds=True))
+        assert actions == []
+        assert sm.state == State.IDLE
+
+    def test_fms_attached_starts_recording(self):
+        clock = FakeClock()
+        sm = MatchStateMachine(record_trigger="fms", clock=clock)
+
+        actions = sm.update(make_fms(enabled=True, auto=True, fms=True, ds=True))
+        assert actions == [Action.START_RECORD]
+        assert sm.state == State.RECORDING_AUTO
