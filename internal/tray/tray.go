@@ -60,6 +60,7 @@ type Tray struct {
 	mu           sync.Mutex
 	dashboardURL string
 	quitCh       chan<- struct{}
+	quitOnce     sync.Once
 	currentColor string
 
 	// Menu items we need to update dynamically.
@@ -110,9 +111,11 @@ func (t *Tray) onReady() {
 			case <-mOpen.ClickedCh:
 				openBrowser(t.dashboardURL)
 			case <-mQuit.ClickedCh:
-				if t.quitCh != nil {
-					close(t.quitCh)
-				}
+				t.quitOnce.Do(func() {
+					if t.quitCh != nil {
+						close(t.quitCh)
+					}
+				})
 				systray.Quit()
 				return
 			}
@@ -205,5 +208,8 @@ func openBrowser(url string) {
 	}
 	if err := cmd.Start(); err != nil {
 		slog.Warn("failed to open browser", "url", url, "err", err)
+		return
 	}
+	// Reap the child process asynchronously so it doesn't become a zombie.
+	go func() { _ = cmd.Wait() }()
 }

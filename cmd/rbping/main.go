@@ -39,20 +39,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	pw := cfg.RavenBrain.Password
 	fmt.Printf("=== RavenBrain Connectivity Test ===\n")
 	fmt.Printf("URL:      %s\n", cfg.RavenBrain.URL)
 	fmt.Printf("Username: %s\n", cfg.RavenBrain.Username)
-	fmt.Printf("Password: len=%d", len(pw))
-	if len(pw) >= 2 {
-		fmt.Printf(" first=%q last=%q", pw[:1], pw[len(pw)-1:])
-	}
-	// Byte sum — for quick comparison against server-side computation
-	sum := 0
-	for _, b := range []byte(pw) {
-		sum += int(b)
-	}
-	fmt.Printf(" bytesum=%d\n", sum)
+	fmt.Printf("Password: [set, %d chars]\n", len(cfg.RavenBrain.Password))
 	fmt.Printf("\n")
 
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -89,8 +79,9 @@ func main() {
 	loginRespBody, _ := io.ReadAll(loginResp.Body)
 	loginResp.Body.Close()
 	fmt.Printf("      Status: %d %s\n", loginResp.StatusCode, loginResp.Status)
-	fmt.Printf("      Body:   %s\n", string(loginRespBody))
 	if loginResp.StatusCode != 200 {
+		// Show error body only on failure (no token to leak)
+		fmt.Printf("      Body:   %s\n", string(loginRespBody))
 		fmt.Printf("      ✗ FAIL: login rejected\n\n")
 
 		// Fallback: try Basic Auth against /api/validate (what RavenBrain tests use)
@@ -101,10 +92,9 @@ func main() {
 		if err != nil {
 			fmt.Printf("      ✗ FAIL: %v\n", err)
 		} else {
-			basicBody, _ := io.ReadAll(basicResp.Body)
+			io.Copy(io.Discard, basicResp.Body)
 			basicResp.Body.Close()
 			fmt.Printf("      Status: %d\n", basicResp.StatusCode)
-			fmt.Printf("      Body:   %s\n", string(basicBody))
 			if basicResp.StatusCode == 200 {
 				fmt.Printf("      ✓ Basic Auth works!\n")
 				fmt.Printf("      → The credentials ARE correct, but POST /login is rejecting them.\n")
@@ -161,10 +151,9 @@ func main() {
 		fmt.Printf("      ✗ FAIL: %v\n", err)
 		os.Exit(1)
 	}
-	valBody, _ := io.ReadAll(valResp.Body)
+	io.Copy(io.Discard, valResp.Body)
 	valResp.Body.Close()
 	fmt.Printf("      Status: %d %s\n", valResp.StatusCode, valResp.Status)
-	fmt.Printf("      Body:   %s\n", string(valBody))
 	if valResp.StatusCode != 200 {
 		fmt.Printf("      ✗ FAIL: expected 200\n")
 		os.Exit(1)
@@ -188,18 +177,10 @@ func splitJWT(token string) []string {
 }
 
 func decodeJWTPayload(segment string) (map[string]any, error) {
-	// JWT uses base64url without padding
-	if pad := 4 - len(segment)%4; pad != 4 {
-		segment += string(make([]byte, pad)) // zero-fill, then replace
-		segment = segment[:len(segment)-pad] + "===="[:pad]
-	}
+	// JWT uses base64url without padding; RawURLEncoding handles unpadded input.
 	decoded, err := base64.RawURLEncoding.DecodeString(segment)
 	if err != nil {
-		// Try with padding
-		decoded, err = base64.URLEncoding.DecodeString(segment)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(decoded, &payload); err != nil {

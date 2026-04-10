@@ -103,11 +103,23 @@ func (c *Client) Connect(team int, port int, prefixes []string) {
 
 // ConnectAddress starts the background connection loop using an explicit
 // server address (IP or hostname).
+//
+// /FMSInfo/ is always prepended to the subscription list regardless of the
+// user-provided prefixes, because the state machine depends on FMS control
+// data to detect match state. Disabling this would silently break the bridge.
 func (c *Client) ConnectAddress(address string, port int, prefixes []string) {
+	// Guard against double-connect — leaks goroutines and context otherwise.
+	c.mu.Lock()
+	if c.cancel != nil {
+		c.mu.Unlock()
+		slog.Warn("ntclient: Connect called while already connected — ignoring")
+		return
+	}
 	c.url = fmt.Sprintf("ws://%s:%d/nt/%s", address, port, c.clientName)
-	c.prefixes = prefixes
-
+	c.prefixes = withFMSInfo(prefixes)
 	c.ctx, c.cancel = context.WithCancel(context.Background())
+	c.mu.Unlock()
+
 	c.wg.Add(1)
 	go c.run()
 }
@@ -115,10 +127,25 @@ func (c *Client) ConnectAddress(address string, port int, prefixes []string) {
 // Subscribe updates the subscription prefixes. If the client is currently
 // connected, the new subscription is sent immediately on the next
 // reconnection. This is safe to call from any goroutine.
+//
+// /FMSInfo/ is always included regardless of the provided prefixes.
 func (c *Client) Subscribe(prefixes []string) {
 	c.mu.Lock()
-	c.prefixes = prefixes
+	c.prefixes = withFMSInfo(prefixes)
 	c.mu.Unlock()
+}
+
+// withFMSInfo ensures /FMSInfo/ is always in the subscription list.
+func withFMSInfo(prefixes []string) []string {
+	for _, p := range prefixes {
+		if p == "/FMSInfo/" {
+			return prefixes
+		}
+	}
+	out := make([]string, 0, len(prefixes)+1)
+	out = append(out, "/FMSInfo/")
+	out = append(out, prefixes...)
+	return out
 }
 
 // Close cleanly shuts down the client, closing the WebSocket connection

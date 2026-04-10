@@ -3,6 +3,7 @@ package ntclient
 import (
 	"fmt"
 
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/typeconv"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -148,58 +149,20 @@ func DecodeDataFrame(data []byte) ([]TopicData, error) {
 	return entries, nil
 }
 
-// toInt converts a msgpack-decoded numeric value to int.
+// toInt wraps typeconv.ToInt with an error return.
 func toInt(v any) (int, error) {
-	switch n := v.(type) {
-	case int8:
-		return int(n), nil
-	case int16:
-		return int(n), nil
-	case int32:
-		return int(n), nil
-	case int64:
-		return int(n), nil
-	case uint8:
-		return int(n), nil
-	case uint16:
-		return int(n), nil
-	case uint32:
-		return int(n), nil
-	case uint64:
-		return int(n), nil
-	case float32:
-		return int(n), nil
-	case float64:
-		return int(n), nil
-	default:
+	n, ok := typeconv.ToInt(v)
+	if !ok {
 		return 0, fmt.Errorf("cannot convert %T to int", v)
 	}
+	return n, nil
 }
 
-// toInt64 converts a msgpack-decoded numeric value to int64.
+// toInt64 wraps typeconv.ToInt64 with an error return.
 func toInt64(v any) (int64, error) {
-	switch n := v.(type) {
-	case int8:
-		return int64(n), nil
-	case int16:
-		return int64(n), nil
-	case int32:
-		return int64(n), nil
-	case int64:
-		return n, nil
-	case uint8:
-		return int64(n), nil
-	case uint16:
-		return int64(n), nil
-	case uint32:
-		return int64(n), nil
-	case uint64:
-		return int64(n), nil
-	case float32:
-		return int64(n), nil
-	case float64:
-		return int64(n), nil
-	default:
+	n, ok := typeconv.ToInt64(v)
+	if !ok {
 		return 0, fmt.Errorf("cannot convert %T to int64", v)
 	}
+	return n, nil
 }

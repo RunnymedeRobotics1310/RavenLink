@@ -13,6 +13,9 @@ bridge:
 
 telemetry:
   nt_paths:
+    # /FMSInfo/ is always subscribed regardless of this list — required for
+    # match detection. Listed here for visibility.
+    - /FMSInfo/
     - /SmartDashboard/
     - /Shuffleboard/
   data_dir: ./data

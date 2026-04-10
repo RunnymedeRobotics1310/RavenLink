@@ -7,9 +7,23 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const plistLabel = "ca.team1310.ravenlink"
+
+// xmlEscape escapes the five XML predefined entities so that arbitrary
+// strings can be safely interpolated into an XML/plist document.
+func xmlEscape(s string) string {
+	r := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		`"`, "&quot;",
+		"'", "&apos;",
+	)
+	return r.Replace(s)
+}
 
 func plistPath() string {
 	home, _ := os.UserHomeDir()
@@ -46,7 +60,7 @@ func Enable() bool {
     <true/>
 </dict>
 </plist>
-`, plistLabel, exe)
+`, xmlEscape(plistLabel), xmlEscape(exe))
 
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		slog.Warn("failed to write LaunchAgent plist", "err", err)

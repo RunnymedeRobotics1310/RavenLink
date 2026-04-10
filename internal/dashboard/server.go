@@ -10,6 +10,8 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,12 +23,42 @@ import (
 //go:embed static/*
 var staticFS embed.FS
 
+// maskedPassword is the sentinel returned in place of sensitive values in
+// GET /api/config. When received on POST, it means "leave unchanged".
+const maskedPassword = "***"
+
+// restartRequiredFields lists config keys whose changes only take effect
+// after a process restart. log_level and launch_on_login are the only
+// fields that actually hot-reload.
+var restartRequiredFields = []string{
+	"team",
+	"obs_host",
+	"obs_port",
+	"obs_password",
+	"stop_delay",
+	"poll_interval",
+	"auto_teleop_gap",
+	"nt_disconnect_grace",
+	"record_trigger",
+	"nt_paths",
+	"data_dir",
+	"retention_days",
+	"ravenbrain_url",
+	"ravenbrain_username",
+	"ravenbrain_password",
+	"ravenbrain_batch_size",
+	"ravenbrain_upload_interval",
+	"dashboard_enabled",
+	"dashboard_port",
+}
+
 // Server is the embedded HTTP dashboard.
 type Server struct {
 	mu         sync.RWMutex
 	status     *status.Status
 	cfg        *config.Config
 	cfgPath    string
+	port       int
 	reloadHook func() // optional callback after config reload
 }
 
@@ -49,9 +81,14 @@ func (s *Server) UpdateStatus(st *status.Status) {
 	s.status = st
 }
 
-// Start begins serving HTTP on the given port. It blocks until ctx is
-// cancelled, then shuts down gracefully.
+// Start begins serving HTTP on the given port, bound to loopback only
+// (127.0.0.1). It blocks until ctx is cancelled, then shuts down
+// gracefully.
 func (s *Server) Start(ctx context.Context, port int) {
+	s.mu.Lock()
+	s.port = port
+	s.mu.Unlock()
+
 	mux := http.NewServeMux()
 
 	// Serve the embedded static files. The embed root is "static/*",
@@ -61,10 +98,12 @@ func (s *Server) Start(ctx context.Context, port int) {
 
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 	mux.HandleFunc("GET /api/config", s.handleConfigGet)
-	mux.HandleFunc("POST /api/config", s.handleConfigPost)
-	mux.HandleFunc("POST /api/config/reload", s.handleConfigReload)
+	mux.HandleFunc("POST /api/config", s.requireSameOrigin(s.handleConfigPost))
+	mux.HandleFunc("POST /api/config/reload", s.requireSameOrigin(s.handleConfigReload))
 
-	addr := fmt.Sprintf(":%d", port)
+	// Bind only to loopback — this dashboard is for the local user,
+	// not a service to expose on the LAN.
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := &http.Server{Addr: addr, Handler: mux}
 
 	go func() {
@@ -73,10 +112,62 @@ func (s *Server) Start(ctx context.Context, port int) {
 		_ = srv.Close()
 	}()
 
-	slog.Info("dashboard started", "addr", fmt.Sprintf("http://localhost:%d", port))
+	slog.Info("dashboard started", "addr", fmt.Sprintf("http://127.0.0.1:%d", port))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("dashboard server error", "err", err)
 	}
+}
+
+// ---------- Middleware ----------
+
+// requireSameOrigin wraps a handler with Origin + Host header validation
+// to provide CSRF protection for state-changing POST endpoints. We reject
+// any request whose Origin (if present) or Host does not match
+// localhost/127.0.0.1 on our listening port.
+func (s *Server) requireSameOrigin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.mu.RLock()
+		port := s.port
+		s.mu.RUnlock()
+
+		if !hostAllowed(r.Host, port) {
+			slog.Warn("dashboard: rejecting request with unexpected Host header",
+				"host", r.Host, "path", r.URL.Path)
+			writeJSONError(w, http.StatusForbidden, "bad host")
+			return
+		}
+
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if !originAllowed(origin, port) {
+				slog.Warn("dashboard: rejecting request with unexpected Origin header",
+					"origin", origin, "path", r.URL.Path)
+				writeJSONError(w, http.StatusForbidden, "bad origin")
+				return
+			}
+		}
+
+		next(w, r)
+	}
+}
+
+func hostAllowed(host string, port int) bool {
+	expected1 := fmt.Sprintf("localhost:%d", port)
+	expected2 := fmt.Sprintf("127.0.0.1:%d", port)
+	return host == expected1 || host == expected2
+}
+
+func originAllowed(origin string, port int) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" {
+		return false
+	}
+	host := u.Host
+	expected1 := fmt.Sprintf("localhost:%d", port)
+	expected2 := fmt.Sprintf("127.0.0.1:%d", port)
+	return host == expected1 || host == expected2
 }
 
 // ---------- Handlers ----------
@@ -100,28 +191,39 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 	cfg := s.cfg
 	s.mu.RUnlock()
 
+	// Mask sensitive fields so passwords are never sent to the browser.
+	obsPwd := ""
+	if cfg.Bridge.OBSPassword != "" {
+		obsPwd = maskedPassword
+	}
+	rbPwd := ""
+	if cfg.RavenBrain.Password != "" {
+		rbPwd = maskedPassword
+	}
+
 	flat := map[string]any{
-		"team":                      cfg.Bridge.Team,
-		"obs_host":                  cfg.Bridge.OBSHost,
-		"obs_port":                  cfg.Bridge.OBSPort,
-		"obs_password":              cfg.Bridge.OBSPassword,
-		"stop_delay":                cfg.Bridge.StopDelay,
-		"poll_interval":             cfg.Bridge.PollInterval,
-		"log_level":                 cfg.Bridge.LogLevel,
-		"auto_teleop_gap":           cfg.Bridge.AutoTeleopGap,
-		"nt_disconnect_grace":       cfg.Bridge.NTDisconnectGrace,
-		"record_trigger":            cfg.Bridge.RecordTrigger,
-		"launch_on_login":           cfg.Bridge.LaunchOnLogin,
-		"nt_paths":                  strings.Join(cfg.Telemetry.NTPaths, ", "),
-		"data_dir":                  cfg.Telemetry.DataDir,
-		"retention_days":            cfg.Telemetry.RetentionDays,
-		"ravenbrain_url":            cfg.RavenBrain.URL,
-		"ravenbrain_username":       cfg.RavenBrain.Username,
-		"ravenbrain_password":       cfg.RavenBrain.Password,
-		"ravenbrain_batch_size":     cfg.RavenBrain.BatchSize,
+		"team":                       cfg.Bridge.Team,
+		"obs_host":                   cfg.Bridge.OBSHost,
+		"obs_port":                   cfg.Bridge.OBSPort,
+		"obs_password":               obsPwd,
+		"stop_delay":                 cfg.Bridge.StopDelay,
+		"poll_interval":              cfg.Bridge.PollInterval,
+		"log_level":                  cfg.Bridge.LogLevel,
+		"auto_teleop_gap":            cfg.Bridge.AutoTeleopGap,
+		"nt_disconnect_grace":        cfg.Bridge.NTDisconnectGrace,
+		"record_trigger":             cfg.Bridge.RecordTrigger,
+		"launch_on_login":            cfg.Bridge.LaunchOnLogin,
+		"nt_paths":                   strings.Join(cfg.Telemetry.NTPaths, ", "),
+		"data_dir":                   cfg.Telemetry.DataDir,
+		"retention_days":             cfg.Telemetry.RetentionDays,
+		"ravenbrain_url":             cfg.RavenBrain.URL,
+		"ravenbrain_username":        cfg.RavenBrain.Username,
+		"ravenbrain_password":        rbPwd,
+		"ravenbrain_batch_size":      cfg.RavenBrain.BatchSize,
 		"ravenbrain_upload_interval": cfg.RavenBrain.UploadInterval,
-		"dashboard_enabled":         cfg.Dashboard.Enabled,
-		"dashboard_port":            cfg.Dashboard.Port,
+		"dashboard_enabled":          cfg.Dashboard.Enabled,
+		"dashboard_port":             cfg.Dashboard.Port,
+		"restart_required":           restartRequiredFields,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -131,7 +233,13 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 	var data map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-		http.Error(w, "bad JSON: "+err.Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+
+	// Validate everything up front, before mutating the live config.
+	if err := validateConfigPost(data); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -147,7 +255,10 @@ func (s *Server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 		case "obs_port":
 			cfg.Bridge.OBSPort = toInt(val, cfg.Bridge.OBSPort)
 		case "obs_password":
-			cfg.Bridge.OBSPassword = val
+			// Treat masked value as "leave unchanged".
+			if val != maskedPassword {
+				cfg.Bridge.OBSPassword = val
+			}
 		case "stop_delay":
 			cfg.Bridge.StopDelay = toFloat(val, cfg.Bridge.StopDelay)
 		case "poll_interval":
@@ -181,7 +292,9 @@ func (s *Server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 		case "ravenbrain_username":
 			cfg.RavenBrain.Username = val
 		case "ravenbrain_password":
-			cfg.RavenBrain.Password = val
+			if val != maskedPassword {
+				cfg.RavenBrain.Password = val
+			}
 		case "ravenbrain_batch_size":
 			cfg.RavenBrain.BatchSize = toInt(val, cfg.RavenBrain.BatchSize)
 		case "ravenbrain_upload_interval":
@@ -196,7 +309,7 @@ func (s *Server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 
 	if err := cfg.SaveConfig(s.cfgPath); err != nil {
 		slog.Error("failed to save config", "err", err)
-		http.Error(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "save failed: "+err.Error())
 		return
 	}
 
@@ -210,7 +323,7 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, _ *http.Request) {
 	if err != nil {
 		s.mu.Unlock()
 		slog.Error("failed to reload config", "err", err)
-		http.Error(w, "reload failed: "+err.Error(), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "reload failed: "+err.Error())
 		return
 	}
 	*s.cfg = *newCfg
@@ -224,7 +337,69 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"reloaded"}`))
 }
 
+// ---------- Validation ----------
+
+// validateConfigPost checks every known field present in data against the
+// allowed range / whitelist. Unknown keys are ignored (forward-compat).
+// Returns a human-readable error on the first failure.
+func validateConfigPost(data map[string]any) error {
+	if v, ok := data["data_dir"]; ok {
+		s := fmt.Sprintf("%v", v)
+		// Reject any path that contains a ".." traversal component.
+		if strings.Contains(filepath.ToSlash(s), "..") {
+			return fmt.Errorf("data_dir must not contain '..'")
+		}
+	}
+	if v, ok := data["dashboard_port"]; ok {
+		n, err := strconv.Atoi(fmt.Sprintf("%v", v))
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("dashboard_port must be between 1 and 65535")
+		}
+	}
+	if v, ok := data["obs_port"]; ok {
+		n, err := strconv.Atoi(fmt.Sprintf("%v", v))
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("obs_port must be between 1 and 65535")
+		}
+	}
+	if v, ok := data["retention_days"]; ok {
+		n, err := strconv.Atoi(fmt.Sprintf("%v", v))
+		if err != nil || n < 1 || n > 365 {
+			return fmt.Errorf("retention_days must be between 1 and 365")
+		}
+	}
+	if v, ok := data["log_level"]; ok {
+		s := fmt.Sprintf("%v", v)
+		switch s {
+		case "DEBUG", "INFO", "WARNING", "ERROR":
+		default:
+			return fmt.Errorf("log_level must be one of DEBUG, INFO, WARNING, ERROR")
+		}
+	}
+	if v, ok := data["record_trigger"]; ok {
+		s := fmt.Sprintf("%v", v)
+		switch s {
+		case "fms", "auto", "any":
+		default:
+			return fmt.Errorf("record_trigger must be one of fms, auto, any")
+		}
+	}
+	if v, ok := data["team"]; ok {
+		n, err := strconv.Atoi(fmt.Sprintf("%v", v))
+		if err != nil || n < 1 || n > 9999 {
+			return fmt.Errorf("team must be between 1 and 9999")
+		}
+	}
+	return nil
+}
+
 // ---------- Helpers ----------
+
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
 
 func toInt(s string, fallback int) int {
 	v, err := strconv.Atoi(s)
