@@ -2,12 +2,35 @@
 # PyInstaller spec for ravenlink
 # Build with: pyinstaller build.spec
 
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_data_files
+
+# Collect native DLLs from robotpy/wpilib packages
+binaries = []
+datas = []
+for pkg in ['ntcore', 'wpiutil', 'wpinet', 'wpimath',
+            'robotpy_wpiutil', 'robotpy_wpinet',
+            'pyntcore', 'robotpy_native_wpiutil',
+            'robotpy_native_wpinet', 'robotpy_native_ntcore']:
+    try:
+        binaries += collect_dynamic_libs(pkg)
+        datas += collect_data_files(pkg)
+    except Exception:
+        pass
+
 a = Analysis(
     ['ravenlink.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=['ntcore', 'obsws_python', 'flask', 'pystray', 'PIL'],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=[
+        'ntcore', 'ntcore._ntcore',
+        'wpiutil', 'wpiutil._wpiutil',
+        'wpinet',
+        'obsws_python', 'flask', 'pystray', 'PIL',
+        'robotpy_wpiutil', 'robotpy_wpinet', 'robotpy_native_wpiutil',
+        'robotpy_native_wpinet', 'robotpy_native_ntcore',
+        'pyntcore',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
