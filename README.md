@@ -58,8 +58,10 @@ python -m src.main --team 1310
 | `--nt-disconnect-grace` | `15` | Seconds to wait before treating NT disconnect as match over |
 | `--nt-paths` | `/SmartDashboard/, /Shuffleboard/` | NT path prefixes to subscribe to (comma-separated) |
 | `--data-dir` | `./data` | Local directory for JSONL telemetry files |
+| `--record-trigger` | `fms` | When to start recording: `fms` (competition only), `auto` (auto mode — catches DS Practice), `any` (any enable) |
 | `--ravenbrain-url` | *(empty)* | RavenBrain server URL (empty = local-only mode) |
-| `--ravenbrain-api-key` | *(empty)* | RavenBrain telemetry API key |
+| `--ravenbrain-username` | *(empty)* | RavenBrain service account username |
+| `--ravenbrain-password` | *(empty)* | RavenBrain service account password |
 | `--no-launch-on-login` | false | Disable automatic launch on login |
 | `--minimized` | false | Start minimized to system tray |
 
@@ -76,6 +78,7 @@ obs_password =
 stop_delay = 10
 poll_interval = 0.05
 log_level = INFO
+record_trigger = fms
 launch_on_login = true
 
 [telemetry]
@@ -85,7 +88,8 @@ retention_days = 30
 
 [ravenbrain]
 url = https://ravenbrain.team1310.ca
-api_key = your-api-key-here
+username = telemetry-agent
+password = your-password-here
 batch_size = 500
 upload_interval = 10
 
@@ -100,12 +104,21 @@ CLI flags override config file values. The web dashboard at `http://localhost:80
 
 ### Match Recording
 
-The bridge runs a state machine:
+The bridge runs a state machine with a configurable trigger (`record_trigger`):
 
-1. **IDLE** — Waiting for a match. Monitoring NetworkTables for FMS state.
-2. **RECORDING (auto)** — FMS attached + robot enabled in auto mode. OBS recording started, match_start marker written.
+| Mode | Trigger | Use case |
+|------|---------|----------|
+| `fms` | FMS attached + enabled | Competition matches (default) |
+| `auto` | Auto mode + enabled | DS Practice button, manual auto enables |
+| `any` | Any enable | Any robot enable triggers recording |
+
+States:
+1. **IDLE** — Waiting. Monitoring NetworkTables for the configured trigger condition.
+2. **RECORDING (auto)** — Trigger condition met. OBS recording started, `match_start` marker written.
 3. **RECORDING (teleop)** — Robot transitions to teleop. Recording continues.
-4. **STOP_PENDING** — Match ended (robot disabled). match_end marker written. Waits 10 seconds then stops OBS recording.
+4. **STOP_PENDING** — Robot disabled. `match_end` marker written. Waits `stop_delay` seconds then stops OBS recording.
+
+The brief disabled gap between auto and teleop (up to `auto_teleop_gap` seconds) is tolerated in all modes so recording isn't accidentally split.
 
 ### NT Data Collection
 
@@ -118,7 +131,8 @@ All NetworkTables value changes under configured path prefixes are logged to JSO
 
 - Data is always written locally to `data_dir/pending/`
 - When RavenBrain is reachable, completed files are uploaded in batches
-- Upload progress is tracked per-file for crash recovery
+- Authenticates via JWT (`POST /login` with service account credentials, auto-renews before expiry)
+- Upload progress tracked server-side (`uploadedCount`) — idempotent on retry, no duplicate data
 - Uploaded files are moved to `data_dir/uploaded/` and pruned after `retention_days`
 
 ## Web Dashboard
@@ -142,13 +156,15 @@ Access at `http://localhost:8080` when the bridge is running:
 - Check that your firewall allows port 5810
 
 **Recording doesn't start:**
-- The bridge only starts recording when FMS is attached (competition/practice matches)
-- Practice at home without FMS won't trigger recording (this is intentional)
+- Check your `record_trigger` setting — `fms` (default) requires FMS to be attached
+- For home practice, set `record_trigger = auto` (use DS Practice button) or `record_trigger = any`
+- In `auto` mode, you must enable in auto mode — plain teleop enable won't trigger
 
 **Data not uploading:**
 - Check that `ravenbrain_url` is set in config
-- Verify the API key is correct
-- Check the dashboard upload status for error messages
+- Verify `username` and `password` are correct for the `telemetry-agent` service account
+- Check the dashboard upload status for error messages (auth errors, connection errors)
+- If you see repeated 401 errors, the password may have been changed on the server
 
 ## Building & Deploying on Windows
 
@@ -200,7 +216,8 @@ data_dir = ./data
 
 [ravenbrain]
 url = https://ravenbrain.team1310.ca
-api_key = your-api-key-here
+username = telemetry-agent
+password = your-password-here
 
 [dashboard]
 enabled = true
