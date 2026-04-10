@@ -3,7 +3,7 @@
 # Build with: pyinstaller build.spec
 
 a = Analysis(
-    ['src/main.py'],
+    ['ravenlink.py'],
     pathex=[],
     binaries=[],
     datas=[],
