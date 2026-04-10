@@ -1,276 +1,216 @@
 # RavenLink
 
-Automatically starts and stops OBS Studio recording based on FRC match state, **and** captures all NetworkTables data for post-match analysis. Runs on the Driver Station laptop, reads match status from the robot via NetworkTables, controls OBS via its WebSocket API, and uploads telemetry to RavenBrain.
+FRC robot data bridge for Team 1310. A single native binary that captures NetworkTables telemetry, controls OBS Studio recording, and forwards data to RavenBrain.
 
-When the FMS enables your robot for a match, recording starts and NT data logging begins. When the match ends, recording stops after a short delay. All telemetry data is stored locally and forwarded to RavenBrain when internet is available. No more forgetting to hit record, no more lost telemetry.
+## What It Does
 
-## Features
+Runs on the Driver Station laptop and:
 
-- **OBS Recording Control** — Auto start/stop OBS recording based on FMS match state
-- **NT Data Collection** — Subscribe to configurable NetworkTables paths, log all value changes to JSONL
-- **Store & Forward** — Data saved locally first, uploaded to RavenBrain when connectivity available
-- **Web Dashboard** — Live status, log viewer, and config editor at `http://localhost:8080`
-- **System Tray** — At-a-glance green/yellow/red status icon with right-click menu
-- **Launch on Login** — Starts automatically with Windows (or macOS), minimized to tray
+- **Captures all NetworkTables data** — subscribes to configurable path prefixes, logs every value change to JSONL files with timestamps
+- **Auto starts/stops OBS recording** — based on FMS match state (or manual/practice mode)
+- **Store-and-forward upload** — data saved locally first, uploaded to RavenBrain when internet is available (with idempotent retry and JWT auth)
+- **Web dashboard** at `http://localhost:8080` — live status, log viewer, config editor
+- **System tray icon** — green/yellow/red status at a glance
+- **Launch on login** — starts automatically when you boot the DS laptop
+
+Built in Go. Single 12 MB static binary. No runtime dependencies.
 
 ## Prerequisites
 
-- **OBS Studio 28+** with the WebSocket server enabled
-- **Windows 10/11** (Driver Station laptop) for competition use
-- **Python 3.11+** if running from source (or just use the `.exe`)
+- **OBS Studio 28+** with WebSocket server enabled (Tools → WebSocket Server Settings)
+- **Windows 10/11** or **macOS** (Linux works for development)
 
-## OBS Setup
+That's it. No Python, no .NET, no JVM. Just the binary.
 
-1. Open OBS Studio
-2. Go to **Tools > WebSocket Server Settings**
-3. Check **Enable WebSocket Server**
-4. Set a **Server Port** (default: `4455`)
-5. Optionally set a **Server Password**
-6. Click **Apply**
-
-## Usage
-
-### From the `.exe`
-
-```
-ravenlink.exe --team 1310
-```
-
-### From source
+## Quick Start
 
 ```bash
-pip install -r requirements.txt
-python -m src.main --team 1310
+# Download or build the binary (see below)
+./ravenlink --team 1310
 ```
 
-### All options
+Open `http://localhost:8080` in your browser for the dashboard.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--team` | *(required)* | Team number — derives robot IP `10.TE.AM.2` |
-| `--obs-host` | `localhost` | OBS WebSocket host |
-| `--obs-port` | `4455` | OBS WebSocket port |
-| `--obs-password` | *(empty)* | OBS WebSocket password |
-| `--stop-delay` | `10` | Seconds after match end before stopping recording |
-| `--poll-interval` | `0.05` | How often to check match state (seconds) |
-| `--log-level` | `INFO` | Log verbosity: DEBUG, INFO, WARNING, ERROR |
-| `--auto-teleop-gap` | `5` | Max disabled seconds between auto/teleop before stopping |
-| `--nt-disconnect-grace` | `15` | Seconds to wait before treating NT disconnect as match over |
-| `--nt-paths` | `/SmartDashboard/, /Shuffleboard/` | NT path prefixes to subscribe to (comma-separated) |
-| `--data-dir` | `./data` | Local directory for JSONL telemetry files |
-| `--record-trigger` | `fms` | When to start recording: `fms` (competition only), `auto` (auto mode — catches DS Practice), `any` (any enable) |
-| `--ravenbrain-url` | *(empty)* | RavenBrain server URL (empty = local-only mode) |
-| `--ravenbrain-username` | *(empty)* | RavenBrain service account username |
-| `--ravenbrain-password` | *(empty)* | RavenBrain service account password |
-| `--no-launch-on-login` | false | Disable automatic launch on login |
-| `--minimized` | false | Start minimized to system tray |
+## Configuration
 
-### Config file
+RavenLink reads `config.yaml` from the current directory on startup. Copy `config.yaml.example`:
 
-Instead of passing flags every time, create a `config.ini` next to the executable (or edit via the web dashboard):
+```yaml
+bridge:
+  team: 1310
+  obs_host: localhost
+  obs_port: 4455
+  obs_password: ""
+  stop_delay: 10
+  poll_interval: 0.05
+  log_level: INFO
+  record_trigger: fms      # fms | auto | any
+  auto_teleop_gap: 5
+  nt_disconnect_grace: 15
+  launch_on_login: true
 
-```ini
-[bridge]
-team = 1310
-obs_host = localhost
-obs_port = 4455
-obs_password =
-stop_delay = 10
-poll_interval = 0.05
-log_level = INFO
-record_trigger = fms
-launch_on_login = true
+telemetry:
+  nt_paths:
+    - /SmartDashboard/
+    - /Shuffleboard/
+  data_dir: ./data
+  retention_days: 30
 
-[telemetry]
-nt_paths = /SmartDashboard/, /Shuffleboard/
-data_dir = ./data
-retention_days = 30
+ravenbrain:
+  url: ""                          # empty = local-only mode (no upload)
+  username: telemetry-agent
+  password: ""
+  batch_size: 500
+  upload_interval: 10
 
-[ravenbrain]
-url = https://ravenbrain.team1310.ca
-username = telemetry-agent
-password = your-password-here
-batch_size = 500
-upload_interval = 10
-
-[dashboard]
-enabled = true
-port = 8080
+dashboard:
+  enabled: true
+  port: 8080
 ```
 
-CLI flags override config file values. The web dashboard at `http://localhost:8080` allows editing config with live preview.
+Any setting can also be overridden by CLI flag — run `ravenlink --help` for the full list.
 
-## How It Works
-
-### Match Recording
-
-The bridge runs a state machine with a configurable trigger (`record_trigger`):
+### Record Trigger Modes
 
 | Mode | Trigger | Use case |
 |------|---------|----------|
 | `fms` | FMS attached + enabled | Competition matches (default) |
 | `auto` | Auto mode + enabled | DS Practice button, manual auto enables |
-| `any` | Any enable | Any robot enable triggers recording |
+| `any` | Any robot enable | Any enable triggers recording |
 
-States:
-1. **IDLE** — Waiting. Monitoring NetworkTables for the configured trigger condition.
-2. **RECORDING (auto)** — Trigger condition met. OBS recording started, `match_start` marker written.
-3. **RECORDING (teleop)** — Robot transitions to teleop. Recording continues.
-4. **STOP_PENDING** — Robot disabled. `match_end` marker written. Waits `stop_delay` seconds then stops OBS recording.
+All three modes use the same stop logic: robot disable → auto-teleop gap tolerance → `stop_delay` → OBS stop.
 
-The brief disabled gap between auto and teleop (up to `auto_teleop_gap` seconds) is tolerated in all modes so recording isn't accidentally split.
+## Building
 
-### NT Data Collection
+Requires Go 1.22+.
 
-All NetworkTables value changes under configured path prefixes are logged to JSONL files:
-- One file per connectivity session (robot connect → disconnect)
-- Match start/end markers with FMS metadata embedded in the data stream
-- `/FMSInfo/*` is always subscribed for match association
+```bash
+# macOS or Linux
+go build -o ravenlink ./cmd/ravenlink
 
-### Store & Forward
-
-- Data is always written locally to `data_dir/pending/`
-- When RavenBrain is reachable, completed files are uploaded in batches
-- Authenticates via JWT (`POST /login` with service account credentials, auto-renews before expiry)
-- Upload progress tracked server-side (`uploadedCount`) — idempotent on retry, no duplicate data
-- Uploaded files are moved to `data_dir/uploaded/` and pruned after `retention_days`
-
-## Web Dashboard
-
-Access at `http://localhost:8080` when the bridge is running:
-
-- **Status tab** — Live connection status, match state, telemetry stats, upload progress
-- **Logs tab** — Recent log output
-- **Config tab** — Edit all settings, save to `config.ini`, hot-reload supported fields
-
-## Troubleshooting
-
-**OBS not detected:**
-- Ensure OBS is running and WebSocket server is enabled
-- Check the port matches (`--obs-port`)
-- If you set a password in OBS, pass it with `--obs-password`
-
-**NetworkTables not connecting:**
-- Verify your team number is correct (`--team`)
-- Ensure the DS laptop can reach the robot at `10.TE.AM.2`
-- Check that your firewall allows port 5810
-
-**Recording doesn't start:**
-- Check your `record_trigger` setting — `fms` (default) requires FMS to be attached
-- For home practice, set `record_trigger = auto` (use DS Practice button) or `record_trigger = any`
-- In `auto` mode, you must enable in auto mode — plain teleop enable won't trigger
-
-**Data not uploading:**
-- Check that `ravenbrain_url` is set in config
-- Verify `username` and `password` are correct for the `telemetry-agent` service account
-- Check the dashboard upload status for error messages (auth errors, connection errors)
-- If you see repeated 401 errors, the password may have been changed on the server
-
-## Building & Deploying on Windows
-
-### Prerequisites
-
-1. Install **Python 3.11+** from [python.org](https://www.python.org/downloads/) — check "Add Python to PATH" during install
-2. Install **OBS Studio 28+** from [obsproject.com](https://obsproject.com/)
-3. Install **Git** from [git-scm.com](https://git-scm.com/) (optional, for cloning the repo)
-
-### Build the `.exe`
-
-Open a Command Prompt or PowerShell:
-
-```powershell
-# Clone the repo (or copy the folder to the DS laptop)
-git clone https://github.com/RunnymedeRobotics1310/RavenLink.git
-cd RavenLink
-
-# Create a virtual environment
-python -m venv venv
-venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-pip install pyinstaller
-
-# Build single-file exe
-pyinstaller build.spec
-
-# Output: dist\ravenlink.exe
+# Windows (from macOS — needs Zig for CGo cross-compile due to systray)
+CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
+  CC="zig cc -target x86_64-windows-gnu" \
+  go build -ldflags "-H=windowsgui" -o ravenlink.exe ./cmd/ravenlink
 ```
 
-### Deploy to the Driver Station Laptop
+For production releases, build natively on each platform via GitHub Actions (avoids CGo cross-compile complexity).
 
-1. Copy `dist\ravenlink.exe` to a permanent location (e.g., `C:\FRC\ravenlink\`)
-2. Create a `config.ini` in the same folder:
+## Deploying on Windows
 
-```ini
-[bridge]
-team = 1310
-obs_host = localhost
-obs_port = 4455
-obs_password =
-launch_on_login = true
-
-[telemetry]
-nt_paths = /SmartDashboard/, /Shuffleboard/
-data_dir = ./data
-
-[ravenbrain]
-url = https://ravenbrain.team1310.ca
-username = telemetry-agent
-password = your-password-here
-
-[dashboard]
-enabled = true
-port = 8080
-```
-
-3. Run it once to verify and register auto-start:
-
-```powershell
-cd C:\FRC\ravenlink
-.\ravenlink.exe --team 1310
-```
-
-4. The bridge will:
-   - Register itself to launch on login (via Windows Registry `HKCU\...\Run`)
+1. Copy `ravenlink.exe` and `config.yaml` to a permanent folder (e.g., `C:\FRC\RavenLink\`)
+2. Run it once:
+   ```
+   C:\FRC\RavenLink\ravenlink.exe --team 1310
+   ```
+3. The bridge will:
+   - Register itself to launch on login (Windows Registry `HKCU\...\Run`)
    - Start the web dashboard at `http://localhost:8080`
-   - Show a system tray icon (green/yellow/red)
+   - Show a system tray icon
    - Begin capturing NT data when the robot connects
 
 ### Competition Day Checklist
 
-1. Turn on the DS laptop — the bridge starts automatically (system tray icon appears)
+1. Turn on DS laptop — RavenLink starts automatically (system tray icon)
 2. Open OBS Studio — ensure WebSocket server is enabled
-3. Verify via the dashboard (`http://localhost:8080`):
+3. Verify via the dashboard:
    - NT: Connected (when robot is on)
    - OBS: Connected
-4. The bridge handles everything else automatically:
-   - Starts/stops OBS recording per match
-   - Logs all NT data to local JSONL files
-   - Uploads to RavenBrain when WiFi is available (pit, hotel, etc.)
+4. The bridge handles everything else — recording, logging, forwarding
 
-### Running from Source (without building `.exe`)
+## How It Works
 
-If you prefer not to build:
+### NT Data Collection
 
-```powershell
-cd RavenLink
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-python -m src.main --team 1310
+RavenLink speaks NT4 natively over WebSocket + MessagePack. It subscribes to the configured path prefixes (always including `/FMSInfo/`) and receives every value change through a Go channel. Each change is written as a JSON line to a session file in `data/pending/`.
+
+Session files are named `{ISO-timestamp}_{hex8}.jsonl`. Match start/end markers with FMS metadata are embedded in the data stream.
+
+### Match State Machine
+
+```
+IDLE → RECORDING_AUTO → RECORDING_TELEOP → STOP_PENDING → IDLE
 ```
 
-### Updating
+- **IDLE → RECORDING_AUTO**: trigger condition met (per `record_trigger`)
+- **RECORDING_AUTO → RECORDING_TELEOP**: auto mode ends, teleop starts (brief disable gap tolerated)
+- **RECORDING_TELEOP → STOP_PENDING**: robot disabled
+- **STOP_PENDING → IDLE**: after `stop_delay`, OBS recording stops
 
-```powershell
-cd RavenLink
-git pull
-venv\Scripts\activate
-pip install -r requirements.txt
-pyinstaller build.spec
-# Copy dist\ravenlink.exe to your deployment folder
+The state machine is pure logic with an injectable clock — 53 unit tests cover every transition.
+
+### Store & Forward
+
+Completed JSONL files in `data/pending/` are uploaded to RavenBrain:
+
+1. `POST /login` → get JWT (cached, auto-renewed 5 min before expiry)
+2. `POST /api/telemetry/session` (idempotent — returns existing session if present)
+3. `GET /api/telemetry/session/{id}` (check server's `uploadedCount`)
+4. `POST /api/telemetry/session/{id}/data` (batches of 500, skips already-uploaded entries)
+5. `POST /api/telemetry/session/{id}/complete`
+6. File moves to `data/uploaded/` (pruned after `retention_days`)
+
+On 401: invalidate token, retry once. On network failure: exponential backoff (5s → 60s).
+
+## Web Dashboard
+
+`http://localhost:8080` when the bridge is running:
+
+- **Status** — live connection status, match state, telemetry stats, upload progress
+- **Logs** — recent log output (auto-scrolling)
+- **Config** — edit all settings, save to `config.yaml`, hot-reload for supported fields
+
+## Troubleshooting
+
+**OBS not detected**
+- Ensure OBS is running with WebSocket server enabled
+- Check the port matches (`--obs-port` / `obs.port`)
+- If you set a password in OBS, set `obs_password` in config
+
+**NetworkTables not connecting**
+- Verify team number is correct
+- Ensure DS laptop can reach the robot at `10.TE.AM.2`
+- Check firewall allows outbound connections to port 5810
+
+**Recording doesn't start**
+- Check `record_trigger` — `fms` (default) requires FMS attached
+- For home practice, use `record_trigger: auto` (DS Practice button) or `any`
+- In `auto` mode, plain teleop enable won't trigger — must enter auto mode
+
+**Data not uploading**
+- Check `ravenbrain.url` is set in config
+- Verify `username` and `password` for the `telemetry-agent` service account
+- Check dashboard upload status for error messages
+- Repeated 401s → password may have changed on the server
+
+## Project Layout
+
 ```
+cmd/ravenlink/main.go         # Entry point + coordinator
+internal/
+├── config/                   # YAML config, CLI flags, hot-reload
+├── statemachine/             # Pure-logic state machine (53 tests)
+├── ntclient/                 # NT4 WebSocket+MessagePack client
+├── ntlogger/                 # JSONL writing, session lifecycle, match markers
+├── uploader/                 # Store-and-forward upload + JWT auth
+├── obsclient/                # OBS WebSocket (via goobs library)
+├── dashboard/                # Embedded HTTP dashboard
+├── tray/                     # System tray icon (fyne.io/systray)
+├── autostart/                # Launch-on-login (build-tagged per OS)
+└── status/                   # Thread-safe shared state
+```
+
+## Dependencies
+
+| Library | Purpose |
+|---------|---------|
+| `github.com/coder/websocket` | WebSocket for NT4 client |
+| `github.com/vmihailenco/msgpack/v5` | NT4 binary frame decoding |
+| `github.com/andreykaipov/goobs` | OBS WebSocket v5 (code-generated) |
+| `fyne.io/systray` | Cross-platform system tray (CGo) |
+| `gopkg.in/yaml.v3` | Config file parsing |
+
+Everything else (HTTP server/client, JSON, embed, JWT decode, file I/O) is Go stdlib.
 
 ## License
 
