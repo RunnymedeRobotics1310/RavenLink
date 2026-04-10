@@ -1,36 +1,32 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-dist/
-build/
-*.egg
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/ravenlink
+/ravenlink.exe
+/dist/
+/bin/
 
-# Virtual environments
-venv/
-.venv/
-env/
+# Go workspace
+go.work
+go.work.sum
+
+# Config with secrets
+config.yaml
+config.yml
+
+# Telemetry data
+data/
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
-
-# PyInstaller
-*.spec.bak
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Config with secrets
-config.ini
-
-# Telemetry data
-data/
 
 # OS
 .DS_Store
