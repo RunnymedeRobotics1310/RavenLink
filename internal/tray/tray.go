@@ -55,7 +55,7 @@ func (t *Tray) Start() {
 
 func (t *Tray) onReady() {
 	slog.Info("tray: onReady fired, installing icon and menu")
-	systray.SetIcon(makeIcon("gray"))
+	setTrayIcon("gray")
 	systray.SetTitle("RavenLink")
 	systray.SetTooltip("RavenLink")
 
@@ -125,7 +125,7 @@ func (t *Tray) UpdateStatus(st *status.Status) {
 
 	if newColor != t.currentColor {
 		t.currentColor = newColor
-		systray.SetIcon(makeIcon(newColor))
+		setTrayIcon(newColor)
 	}
 
 	// Build tooltip.

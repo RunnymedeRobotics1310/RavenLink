@@ -95,10 +95,14 @@ cat > "${APP_DIR}/Contents/Info.plist" <<EOF
     <string>${APP_NAME}</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
-    <!-- LSUIElement=true makes this a menu-bar-only accessory app:
-         no dock icon, no main window, just the systray icon. -->
-    <key>LSUIElement</key>
-    <true/>
+    <!-- We deliberately do NOT set LSUIElement=true here.
+         LSUIElement would hide the Dock icon, but it also seems to
+         prevent fyne.io/systray from reliably showing the menu bar
+         icon on recent macOS versions. Running as a regular app gives
+         the user a visible Dock icon AND a visible menu bar icon,
+         which is what Slack/Dropbox/Discord/etc do. -->
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
