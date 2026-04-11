@@ -84,17 +84,33 @@ All three modes use the same stop logic: robot disable → auto-teleop gap toler
 
 Requires Go 1.22+.
 
-```bash
-# macOS or Linux
-go build -o ravenlink ./cmd/ravenlink
+### macOS (build as a .app bundle)
 
-# Windows (from macOS — needs Zig for CGo cross-compile due to systray)
-CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
-  CC="zig cc -target x86_64-windows-gnu" \
-  go build -ldflags "-H=windowsgui" -o ravenlink.exe ./cmd/ravenlink
+```bash
+./scripts/build-macos.sh arm64   # or amd64 or universal
+open dist/RavenLink.app           # registers with Window Server
 ```
 
-For production releases, build natively on each platform via GitHub Actions (avoids CGo cross-compile complexity).
+**Important:** On macOS, running the raw Go binary **will not show the menu bar icon**. The process needs to be a `.app` bundle with `LSUIElement=true` in Info.plist so macOS treats it as a menu-bar-only accessory app. The `build-macos.sh` script handles this.
+
+For development, you can still run the binary directly (`./ravenlink --team 1310`) — everything works except the tray icon.
+
+### Linux
+
+```bash
+go build -o ravenlink ./cmd/ravenlink
+./ravenlink --team 1310
+```
+
+### Windows
+
+```powershell
+# Build natively on Windows
+$env:CGO_ENABLED = 1
+go build -ldflags "-H=windowsgui" -o ravenlink.exe ./cmd/ravenlink
+```
+
+Cross-compile from macOS is possible but awkward — `fyne.io/systray` requires CGo which needs a Windows C cross-compiler (zig or MinGW). For releases, build natively on each platform via GitHub Actions.
 
 ## Deploying on Windows
 
@@ -210,6 +226,12 @@ On any of these, RavenLink performs a two-phase shutdown:
 - Verify `username` and `password` for the `telemetry-agent` service account
 - Check dashboard upload status for error messages
 - Repeated 401s → password may have changed on the server
+
+**System tray icon missing**
+- **macOS**: running the raw binary doesn't register with the Window Server. Build with `./scripts/build-macos.sh` and launch with `open dist/RavenLink.app`. The `.app` bundle includes `LSUIElement=true` which tells macOS to show the icon in the menu bar.
+- **Windows**: the icon is probably hidden in the tray overflow area. Click the `^` arrow in the system tray to see it, then drag-and-drop it to the always-visible area. Windows hides new tray icons by default.
+- **Linux**: requires a system tray implementation (most desktop environments have one; GNOME needs an extension).
+- Check logs for `tray: onReady fired` — if present, the tray IS installed; if missing, the tray goroutine didn't start (check CGo was enabled during build).
 
 ## Project Layout
 

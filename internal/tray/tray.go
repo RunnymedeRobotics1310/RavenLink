@@ -83,11 +83,19 @@ func New(dashboardURL string, quitCh chan<- struct{}) *Tray {
 // Start initialises the system tray icon. It blocks until the tray
 // exits, so call it from a dedicated goroutine (or use systray.Run
 // which itself blocks).
+//
+// On macOS, systray.Run MUST be called from the main goroutine, and
+// the process must be a proper GUI app (bundled as .app, or with
+// NSApplication.activationPolicy set to accessory). fyne.io/systray
+// handles the latter internally via a call to TransformProcessType.
 func (t *Tray) Start() {
+	slog.Info("tray: starting systray event loop")
 	systray.Run(t.onReady, t.onExit)
+	slog.Info("tray: systray event loop exited")
 }
 
 func (t *Tray) onReady() {
+	slog.Info("tray: onReady fired, installing icon and menu")
 	systray.SetIcon(makeIcon("gray"))
 	systray.SetTitle("RavenLink")
 	systray.SetTooltip("RavenLink")
