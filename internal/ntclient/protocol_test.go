@@ -1,6 +1,7 @@
 package ntclient
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
 
@@ -205,6 +206,39 @@ func TestEncodeMultipleEntries(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestDecodeNT4ConcatenatedFrames — NT4 binary frames are a SEQUENCE of
+// concatenated 4-element MessagePack arrays, not a single top-level array.
+// Verify we correctly decode a raw byte stream built that way.
+// ---------------------------------------------------------------------------
+
+func TestDecodeNT4ConcatenatedFrames(t *testing.T) {
+	// Manually construct the NT4 wire format: two concatenated MessagePack
+	// 4-element arrays (what a real roboRIO actually sends).
+	var buf bytes.Buffer
+	enc := msgpack.NewEncoder(&buf)
+	if err := enc.Encode([]any{1, int64(1000), TypeBoolean, true}); err != nil {
+		t.Fatalf("encode 1: %v", err)
+	}
+	if err := enc.Encode([]any{2, int64(2000), TypeDouble, 3.14}); err != nil {
+		t.Fatalf("encode 2: %v", err)
+	}
+
+	entries, err := DecodeDataFrame(buf.Bytes())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	if entries[0].TopicID != 1 || entries[0].Value != true {
+		t.Errorf("entry 0 wrong: %+v", entries[0])
+	}
+	if entries[1].TopicID != 2 || entries[1].Value != 3.14 {
+		t.Errorf("entry 1 wrong: %+v", entries[1])
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TestDecodeMalformed — garbage input returns an error without panicking.
 // ---------------------------------------------------------------------------
 
@@ -217,8 +251,15 @@ func TestDecodeMalformed(t *testing.T) {
 	})
 
 	t.Run("empty_bytes", func(t *testing.T) {
-		if _, err := DecodeDataFrame(nil); err == nil {
-			t.Error("expected error on nil input")
+		// An empty frame is legal — it decodes to an empty slice of entries.
+		// NT4 binary frames are concatenated MessagePack values; zero of them
+		// is a valid (if useless) frame.
+		entries, err := DecodeDataFrame(nil)
+		if err != nil {
+			t.Errorf("empty frame should decode cleanly, got: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("empty frame should produce 0 entries, got %d", len(entries))
 		}
 	})
 

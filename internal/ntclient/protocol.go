@@ -1,7 +1,9 @@
 package ntclient
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/typeconv"
 	"github.com/vmihailenco/msgpack/v5"
@@ -102,41 +104,57 @@ type TopicData struct {
 
 // EncodeDataFrame encodes a slice of TopicData into a MessagePack binary
 // payload suitable for sending as a WebSocket binary frame.
+//
+// NT4 binary frames are a sequence of concatenated 4-element MessagePack
+// arrays, NOT a single top-level array. See the NT4 protocol specification:
+// https://github.com/wpilibsuite/allwpilib/blob/main/ntcore/doc/networktables4.adoc
 func EncodeDataFrame(entries []TopicData) ([]byte, error) {
-	raw := make([]any, len(entries))
-	for i, e := range entries {
-		raw[i] = []any{e.TopicID, e.TimestampMicros, e.TypeID, e.Value}
+	var buf bytes.Buffer
+	enc := msgpack.NewEncoder(&buf)
+	for _, e := range entries {
+		arr := []any{e.TopicID, e.TimestampMicros, e.TypeID, e.Value}
+		if err := enc.Encode(arr); err != nil {
+			return nil, fmt.Errorf("msgpack encode: %w", err)
+		}
 	}
-	return msgpack.Marshal(raw)
+	return buf.Bytes(), nil
 }
 
 // DecodeDataFrame decodes a MessagePack binary payload into a slice of
-// TopicData entries. The payload must be an array of 4-element arrays.
+// TopicData entries.
+//
+// NT4 binary frames are a sequence of concatenated 4-element MessagePack
+// arrays, NOT a single top-level array. We stream-decode them one at a time.
 func DecodeDataFrame(data []byte) ([]TopicData, error) {
-	var raw [][]any
-	if err := msgpack.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("msgpack unmarshal: %w", err)
-	}
+	dec := msgpack.NewDecoder(bytes.NewReader(data))
+	var entries []TopicData
+	for {
+		var arr []any
+		err := dec.Decode(&arr)
+		if err != nil {
+			if err == io.EOF {
+				return entries, nil
+			}
+			return nil, fmt.Errorf("msgpack unmarshal: %w", err)
+		}
 
-	entries := make([]TopicData, 0, len(raw))
-	for i, arr := range raw {
 		if len(arr) < 4 {
-			return nil, fmt.Errorf("entry %d: expected 4 elements, got %d", i, len(arr))
+			return nil, fmt.Errorf("entry %d: expected 4 elements, got %d", len(entries), len(arr))
 		}
 
 		topicID, err := toInt(arr[0])
 		if err != nil {
-			return nil, fmt.Errorf("entry %d topicID: %w", i, err)
+			return nil, fmt.Errorf("entry %d topicID: %w", len(entries), err)
 		}
 
 		ts, err := toInt64(arr[1])
 		if err != nil {
-			return nil, fmt.Errorf("entry %d timestamp: %w", i, err)
+			return nil, fmt.Errorf("entry %d timestamp: %w", len(entries), err)
 		}
 
 		typeID, err := toInt(arr[2])
 		if err != nil {
-			return nil, fmt.Errorf("entry %d typeID: %w", i, err)
+			return nil, fmt.Errorf("entry %d typeID: %w", len(entries), err)
 		}
 
 		entries = append(entries, TopicData{
@@ -146,7 +164,6 @@ func DecodeDataFrame(data []byte) ([]TopicData, error) {
 			Value:           arr[3],
 		})
 	}
-	return entries, nil
 }
 
 // toInt wraps typeconv.ToInt with an error return.
