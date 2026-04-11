@@ -229,6 +229,8 @@ func main() {
 		ntLog *ntlogger.Logger
 		up    *uploader.Uploader
 		auth  *uploader.Auth
+		sm    *statemachine.Machine
+		fmsCh chan ntclient.TopicValue
 	)
 
 	// ============================================================
@@ -251,7 +253,7 @@ func main() {
 		defer obs.Close()
 
 		// State machine
-		sm := statemachine.NewMachine(
+		sm = statemachine.NewMachine(
 			statemachine.WithStopDelay(cfg.Bridge.StopDelay),
 			statemachine.WithAutoTeleopGap(cfg.Bridge.AutoTeleopGap),
 			statemachine.WithNTDisconnectGrace(cfg.Bridge.NTDisconnectGrace),
@@ -260,7 +262,7 @@ func main() {
 
 		// NT logger — fans out the single NT values channel.
 		logCh := make(chan ntclient.TopicValue, 512)
-		fmsCh := make(chan ntclient.TopicValue, 64)
+		fmsCh = make(chan ntclient.TopicValue, 64)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -314,13 +316,6 @@ func main() {
 			defer wg.Done()
 			up.Run(ctx)
 		}()
-
-		// Main loop goroutine — runs state machine + status updates
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			runMainLoop(ctx, cfg, sm, nt, obs, ntLog, up, st, nil, nil, fmsCh, auth)
-		}()
 	}
 
 	// ============================================================
@@ -367,10 +362,27 @@ func main() {
 	dashboardURL := fmt.Sprintf("http://localhost:%d", cfg.Dashboard.Port)
 	trayIcon := tray.New(dashboardURL, quitCh)
 
+	// Main loop goroutine — runs state machine + status updates.
+	// Launched AFTER dash and trayIcon exist so it can pass real
+	// (non-nil) values into runMainLoop, which dereferences them on
+	// every status tick.
+	if !firstRun {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runMainLoop(ctx, cfg, sm, nt, obs, ntLog, up, st, dash, trayIcon, fmsCh, auth)
+		}()
+	}
+
 	// Auto-open the browser to the dashboard on startup. This gives
 	// the user a visible confirmation that RavenLink launched, and
 	// doubles as the first-run setup flow when team==0.
-	if cfg.Dashboard.Enabled {
+	//
+	// Suppressed in --minimized mode (used by autostart on login) so
+	// the user doesn't get a surprise browser window on every reboot.
+	// First-run is an exception: if we genuinely have no config yet,
+	// we still open the wizard so the user can complete setup.
+	if cfg.Dashboard.Enabled && (!cfg.Minimized || firstRun) {
 		go func() {
 			// Give the HTTP listener a moment to bind.
 			time.Sleep(300 * time.Millisecond)
@@ -382,6 +394,8 @@ func main() {
 				lifecycle.OpenBrowser(dashboardURL)
 			}
 		}()
+	} else if cfg.Minimized {
+		slog.Info("started --minimized; skipping browser auto-open")
 	}
 
 	// Wait for shutdown signal

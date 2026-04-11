@@ -26,6 +26,7 @@ type Tray struct {
 	mStatus *systray.MenuItem
 	mNT     *systray.MenuItem
 	mOBS    *systray.MenuItem
+	mBrain  *systray.MenuItem
 }
 
 // New creates a new Tray. dashboardURL is opened in the browser when
@@ -59,7 +60,8 @@ func (t *Tray) Start() {
 func (t *Tray) onReady() {
 	slog.Info("tray: onReady fired, installing icon and menu")
 	setTrayIcon("gray")
-	systray.SetTitle("RavenLink")
+	// Deliberately no SetTitle — the menu bar should show only the
+	// icon, not the text "RavenLink" next to it.
 	systray.SetTooltip("RavenLink")
 
 	mOpen := systray.AddMenuItem("Open Dashboard", "Open the web dashboard in a browser")
@@ -67,10 +69,12 @@ func (t *Tray) onReady() {
 
 	t.mStatus = systray.AddMenuItem("State: IDLE", "")
 	t.mStatus.Disable()
-	t.mNT = systray.AddMenuItem("NT: Unknown", "")
+	t.mNT = systray.AddMenuItem("⚪ NT", "")
 	t.mNT.Disable()
-	t.mOBS = systray.AddMenuItem("OBS: Unknown", "")
+	t.mOBS = systray.AddMenuItem("⚪ OBS", "")
 	t.mOBS.Disable()
+	t.mBrain = systray.AddMenuItem("⚪ RavenBrain", "")
+	t.mBrain.Disable()
 
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Quit RavenLink")
@@ -103,9 +107,9 @@ func (t *Tray) UpdateStatus(st *status.Status) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	var ntConnected, obsConnected, obsRecording bool
+	var ntConnected, obsConnected, obsRecording, brainConfigured bool
 	var matchState string
-	var entriesWritten int
+	var entriesWritten, filesPending int
 
 	st.Snapshot(func(s *status.Status) {
 		ntConnected = s.NTConnected
@@ -113,6 +117,8 @@ func (t *Tray) UpdateStatus(st *status.Status) {
 		obsRecording = s.OBSRecording
 		matchState = s.MatchState
 		entriesWritten = s.EntriesWritten
+		brainConfigured = s.RavenBrainReachable
+		filesPending = s.FilesPending
 	})
 
 	// Determine colour.
@@ -141,15 +147,19 @@ func (t *Tray) UpdateStatus(st *status.Status) {
 	}
 	systray.SetTooltip("RavenLink: " + tooltip)
 
-	// Update menu items.
+	// Update menu items. Connection rows use colored-dot emoji for
+	// an at-a-glance status read; text-only items (State) stay as text.
 	if t.mStatus != nil {
 		t.mStatus.SetTitle("State: " + matchState)
 	}
 	if t.mNT != nil {
-		t.mNT.SetTitle("NT: " + connText(ntConnected))
+		t.mNT.SetTitle(connDot(ntConnected) + " NT")
 	}
 	if t.mOBS != nil {
-		t.mOBS.SetTitle("OBS: " + connText(obsConnected))
+		t.mOBS.SetTitle(connDot(obsConnected) + " OBS")
+	}
+	if t.mBrain != nil {
+		t.mBrain.SetTitle(brainDot(brainConfigured, filesPending) + " RavenBrain")
 	}
 }
 
@@ -158,11 +168,30 @@ func (t *Tray) Stop() {
 	systray.Quit()
 }
 
-func connText(connected bool) string {
+// connDot returns a green circle for a live connection and a
+// neutral white circle otherwise. Disconnected is a common/expected
+// idle state (robot off, OBS not running yet), so we deliberately
+// don't flag it as red — we just don't light it up.
+func connDot(connected bool) string {
 	if connected {
-		return "Connected"
+		return "🟢"
 	}
-	return "Disconnected"
+	return "⚪"
+}
+
+// brainDot is like connDot but adds a yellow "work pending" state:
+//
+//	not configured       → ⚪
+//	configured, backlog  → 🟡  (files in pending/ waiting to upload)
+//	configured, caught up → 🟢
+func brainDot(configured bool, filesPending int) string {
+	if !configured {
+		return "⚪"
+	}
+	if filesPending > 0 {
+		return "🟡"
+	}
+	return "🟢"
 }
 
 // openBrowser opens the given URL in the default browser.

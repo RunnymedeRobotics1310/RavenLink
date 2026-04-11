@@ -9,11 +9,13 @@ Runs on the Driver Station laptop and:
 - **Captures all NetworkTables data** — subscribes to configurable path prefixes, logs every value change to JSONL files with timestamps
 - **Auto starts/stops OBS recording** — based on FMS match state (or manual/practice mode)
 - **Store-and-forward upload** — data saved locally first, uploaded to RavenBrain when internet is available (with idempotent retry and JWT auth)
-- **Web dashboard** at `http://localhost:8080` — live status, log viewer, config editor
-- **System tray icon** — green/yellow/red status at a glance
-- **Launch on login** — starts automatically when you boot the DS laptop
+- **Web dashboard** at `http://localhost:8080` — live status, log viewer, config editor, restart/shutdown buttons
+- **Menu bar / system tray icon** — click for connection status, "Open Dashboard", "Quit". Menu rows use colored dots (🟢 live, 🟡 backlog, ⚪ idle) for NT, OBS, and RavenBrain
+- **Auto-opens the dashboard** in your browser on launch (unless started in `--minimized` mode by autostart)
+- **First-run wizard** — ships with no team configured; on first launch the dashboard opens a config form, and saving restarts RavenLink with the new values automatically
+- **Launch on login** — registers itself so it starts when you boot the DS laptop
 
-Built in Go. Single 12 MB static binary. No runtime dependencies.
+Built in Go. Single ~14 MB static binary. No runtime dependencies.
 
 ## Prerequisites
 
@@ -109,9 +111,9 @@ Requires Go 1.22+.
 open dist/RavenLink.app           # registers with Window Server
 ```
 
-**Important:** On macOS, running the raw Go binary **will not show the menu bar icon**. The process needs to be a `.app` bundle with `LSUIElement=true` in Info.plist so macOS treats it as a menu-bar-only accessory app. The `build-macos.sh` script handles this.
+**Important:** On macOS, running the raw Go binary **will not show the menu bar icon**. The process needs to be a `.app` bundle with `LSUIElement=true` in Info.plist so macOS treats it as a menu-bar-only accessory app (no Dock icon, no ⌘-Tab entry — just the menu bar icon). The `build-macos.sh` script handles this.
 
-For development, you can still run the binary directly (`./ravenlink --team 1310`) — everything works except the tray icon.
+For development, you can still run the binary directly (`./ravenlink --team 1310`) — everything works except the menu bar icon.
 
 ### Linux
 
@@ -122,11 +124,22 @@ go build -o ravenlink ./cmd/ravenlink
 
 ### Windows
 
-`fyne.io/systray` requires CGo on Windows. You have two options:
+Unlike macOS, `fyne.io/systray` is **pure Go on Windows** (it uses `syscall` + `golang.org/x/sys/windows`, no CGo). This makes Windows cross-compilation trivial:
 
 **Option A — Cross-compile from macOS/Linux (recommended for dev)**
 
-Install [Zig](https://ziglang.org/download/) (`brew install zig` on macOS), which ships with a Windows C cross-compiler out of the box. Then:
+No C toolchain needed. From any platform:
+
+```bash
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+  go build -ldflags "-H=windowsgui" -o ravenlink.exe ./cmd/ravenlink
+```
+
+The `-H=windowsgui` linker flag suppresses the console window so only the tray icon is visible when the user launches the exe. Copy `ravenlink.exe` to the DS laptop and run.
+
+**Option B — Cross-compile with CGo via Zig (fallback)**
+
+If you ever re-enable a CGo dependency on Windows, install [Zig](https://ziglang.org/download/) (`brew install zig` on macOS), which ships with a Windows C cross-compiler:
 
 ```bash
 CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
@@ -134,20 +147,16 @@ CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
   go build -ldflags "-H=windowsgui" -o ravenlink.exe ./cmd/ravenlink
 ```
 
-The `-H=windowsgui` linker flag suppresses the console window so only the tray icon is visible when the user launches the exe.
+**Option C — Build natively on Windows**
 
-Copy `ravenlink.exe` to the DS laptop and run.
-
-**Option B — Build natively on Windows**
-
-Install Go and a C toolchain (MSYS2 / MinGW-w64 / TDM-GCC), then:
+Install Go, then:
 
 ```powershell
-$env:CGO_ENABLED = "1"
+$env:CGO_ENABLED = "0"
 go build -ldflags "-H=windowsgui" -o ravenlink.exe ./cmd/ravenlink
 ```
 
-For production releases, build natively on each platform via GitHub Actions (avoids keeping a Windows toolchain on your dev machine).
+(If CGo is needed, also install a C toolchain: MSYS2 / MinGW-w64 / TDM-GCC, and set `$env:CGO_ENABLED = "1"`.)
 
 ## Deploying on Windows
 
@@ -264,40 +273,49 @@ On any of these, RavenLink performs a two-phase shutdown:
 - Check dashboard upload status for error messages
 - Repeated 401s → password may have changed on the server
 
-**System tray icon missing**
-- **macOS**: running the raw binary doesn't register with the Window Server. Build with `./scripts/build-macos.sh` and launch with `open dist/RavenLink.app`. The `.app` bundle includes `LSUIElement=true` which tells macOS to show the icon in the menu bar.
+**Menu bar / system tray icon missing**
+- **macOS**: running the raw binary doesn't register with the Window Server. Build with `./scripts/build-macos.sh` and launch with `open dist/RavenLink.app`. The `.app` bundle sets `LSUIElement=true`, which makes RavenLink a menu-bar-only accessory (no Dock icon, no ⌘-Tab entry).
 - **Windows**: the icon is probably hidden in the tray overflow area. Click the `^` arrow in the system tray to see it, then drag-and-drop it to the always-visible area. Windows hides new tray icons by default.
 - **Linux**: requires a system tray implementation (most desktop environments have one; GNOME needs an extension).
-- Check logs for `tray: onReady fired` — if present, the tray IS installed; if missing, the tray goroutine didn't start (check CGo was enabled during build).
+- Check logs for `tray: onReady fired` — if present, the tray IS installed; if missing, the tray goroutine didn't start.
 
 ## Project Layout
 
 ```
 cmd/ravenlink/main.go         # Entry point + coordinator
+cmd/iconbuilder/              # Generates .iconset → .icns for the .app bundle
 internal/
-├── config/                   # YAML config, CLI flags, hot-reload
-├── statemachine/             # Pure-logic state machine (53 tests)
+├── assets/                   # Embedded team logo PNG
+├── autostart/                # Launch-on-login (build-tagged per OS)
+├── config/                   # YAML config, CLI flags, save-and-restart
+├── dashboard/                # Embedded HTTP dashboard + static UI
+├── lifecycle/                # Self-restart (exec/spawn), OpenBrowser
 ├── ntclient/                 # NT4 WebSocket+MessagePack client
 ├── ntlogger/                 # JSONL writing, session lifecycle, match markers
-├── uploader/                 # Store-and-forward upload + JWT auth
 ├── obsclient/                # OBS WebSocket (via goobs library)
-├── dashboard/                # Embedded HTTP dashboard
-├── tray/                     # System tray icon (fyne.io/systray)
-├── autostart/                # Launch-on-login (build-tagged per OS)
-└── status/                   # Thread-safe shared state
+├── paths/                    # OS-standard config + log file paths
+├── statemachine/             # Pure-logic state machine (53 tests)
+├── status/                   # Thread-safe shared state
+├── tray/                     # Menu bar / system tray icon (fyne.io/systray)
+└── uploader/                 # Store-and-forward upload + JWT auth
+third_party/
+└── systray/                  # Vendored fyne.io/systray (one-line patch)
 ```
 
 ## Dependencies
 
-| Library | Purpose |
-|---------|---------|
-| `github.com/coder/websocket` | WebSocket for NT4 client |
-| `github.com/vmihailenco/msgpack/v5` | NT4 binary frame decoding |
-| `github.com/andreykaipov/goobs` | OBS WebSocket v5 (code-generated) |
-| `fyne.io/systray` | Cross-platform system tray (CGo) |
-| `gopkg.in/yaml.v3` | Config file parsing |
+| Library | Purpose | CGo |
+|---------|---------|-----|
+| `github.com/coder/websocket` | WebSocket for NT4 client | No |
+| `github.com/vmihailenco/msgpack/v5` | NT4 binary frame decoding | No |
+| `github.com/andreykaipov/goobs` | OBS WebSocket v5 (code-generated) | No |
+| `fyne.io/systray` | Cross-platform system tray | **macOS only** (uses Cocoa); pure Go on Windows/Linux |
+| `gopkg.in/yaml.v3` | Config file parsing | No |
+| `golang.org/x/sys/windows/registry` | Windows launch-on-login (build-tagged) | No |
 
 Everything else (HTTP server/client, JSON, embed, JWT decode, file I/O) is Go stdlib.
+
+`fyne.io/systray` is vendored into `third_party/systray/` via a `replace` directive in `go.mod`. The only patch is a one-line fix in `systray_darwin.m` that positions the popup menu at `(0, 0)` instead of `(0, button.height + 6)` — the upstream coordinate places the menu above the top of the screen, which forces macOS to clamp it and show a scroll arrow that hides the first menu item.
 
 ## License
 

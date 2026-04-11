@@ -17,6 +17,11 @@ type Config struct {
 	Telemetry  TelemetryConfig  `yaml:"telemetry"`
 	RavenBrain RavenBrainConfig `yaml:"ravenbrain"`
 	Dashboard  DashboardConfig  `yaml:"dashboard"`
+
+	// Minimized is a runtime-only flag (not persisted to YAML) set by
+	// --minimized on the command line. When true, auto-launched
+	// RavenLink should skip opening the browser on startup.
+	Minimized bool `yaml:"-"`
 }
 
 // BridgeConfig holds settings for the OBS/NT bridge core.
@@ -231,6 +236,14 @@ func ParseFlags(cfg *Config) {
 	dashboardPort := fs.Int("dashboard-port", cfg.Dashboard.Port, "Dashboard HTTP port")
 	noDashboard := fs.Bool("no-dashboard", false, "Disable the status dashboard")
 
+	// Lifecycle flags
+	// --minimized is passed by the autostart registration (LaunchAgent
+	// on macOS, Run key on Windows) so the auto-launched app knows to
+	// skip the browser auto-open. Without this flag registered, flag
+	// parsing would fail with "flag provided but not defined" and
+	// autostart would be broken.
+	minimized := fs.Bool("minimized", false, "Start without opening the browser (used by autostart)")
+
 	// Config file flag (informational — caller is responsible for loading)
 	_ = fs.String("config", "config.yaml", "Path to YAML config file")
 
@@ -266,4 +279,6 @@ func ParseFlags(cfg *Config) {
 	if *noDashboard {
 		cfg.Dashboard.Enabled = false
 	}
+
+	cfg.Minimized = *minimized
 }

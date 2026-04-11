@@ -95,12 +95,13 @@ cat > "${APP_DIR}/Contents/Info.plist" <<EOF
     <string>${APP_NAME}</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
-    <!-- We deliberately do NOT set LSUIElement=true here.
-         LSUIElement would hide the Dock icon, but it also seems to
-         prevent fyne.io/systray from reliably showing the menu bar
-         icon on recent macOS versions. Running as a regular app gives
-         the user a visible Dock icon AND a visible menu bar icon,
-         which is what Slack/Dropbox/Discord/etc do. -->
+    <!-- LSUIElement=true makes RavenLink a menu-bar-only "accessory"
+         app: no Dock icon, no app menu, no ⌘-Tab entry. The user
+         opens the dashboard via the menu bar icon's "Open Dashboard"
+         item or by re-launching the app (which re-opens the browser
+         from main.go). -->
+    <key>LSUIElement</key>
+    <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>

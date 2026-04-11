@@ -21,3 +21,9 @@ require (
 	github.com/nu7hatch/gouuid v0.0.0-20131221200532-179d4d0c4d8d // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 )
+
+// Local fork of fyne.io/systray with a one-line patch to show_menu
+// (positions the menu at (0,0) instead of (0, height+6)) so the menu
+// bar menu doesn't appear scrolled up with a ^ arrow. See
+// third_party/systray/systray_darwin.m.
+replace fyne.io/systray => ./third_party/systray
