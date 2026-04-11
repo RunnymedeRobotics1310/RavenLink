@@ -123,7 +123,13 @@ func (s *Server) Start(ctx context.Context, port int) {
 	go func() {
 		<-ctx.Done()
 		slog.Info("shutting down dashboard server")
-		_ = srv.Close()
+		// Graceful shutdown: allow in-flight requests to finish
+		// responding (most importantly the one that triggered the
+		// shutdown — the browser needs to receive the 200 before
+		// the TCP connection closes, or fetch() throws TypeError).
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
 	}()
 
 	slog.Info("dashboard started", "addr", fmt.Sprintf("http://127.0.0.1:%d", port))
@@ -364,14 +370,17 @@ func (s *Server) handleShutdown(w http.ResponseWriter, _ *http.Request) {
 	}
 	slog.Info("shutdown requested via dashboard")
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Connection", "close")
 	_, _ = w.Write([]byte(`{"status":"shutting down"}`))
-
-	// Flush the response before initiating shutdown so the browser sees it.
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		// Give the response time to flush out to the client through
+		// the kernel TCP stack before we begin tearing down the
+		// server. Without this delay fetch() throws TypeError because
+		// the socket closes mid-read.
+		time.Sleep(500 * time.Millisecond)
 		hook()
 	}()
 }
@@ -388,13 +397,13 @@ func (s *Server) handleRestart(w http.ResponseWriter, _ *http.Request) {
 	}
 	slog.Info("restart requested via dashboard")
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Connection", "close")
 	_, _ = w.Write([]byte(`{"status":"restarting"}`))
-
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 		hook()
 	}()
 }

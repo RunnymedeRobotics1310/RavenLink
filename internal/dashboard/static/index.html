@@ -291,11 +291,15 @@ const btnShutdown=document.getElementById('btn-shutdown');
 if(btnShutdown){
   btnShutdown.addEventListener('click',()=>{
     if(!confirm('Shut down RavenLink? Any pending uploads will be drained first.'))return;
-    fetch('/api/shutdown',{method:'POST'})
-      .then(()=>{
-        document.body.innerHTML='<div style="padding:40px;text-align:center;color:#94a3b8;font-family:sans-serif">RavenLink is shutting down…</div>';
-      })
-      .catch(err=>alert('Shutdown failed: '+err));
+    // Fire-and-forget: the server sends 200 then exits. fetch() may
+    // resolve with the response OR reject with TypeError if the
+    // socket closes before the browser reads the body. Both outcomes
+    // mean "shutdown was accepted" — display the goodbye screen in
+    // either case.
+    const goodbye=()=>{
+      document.body.innerHTML='<div style="padding:40px;text-align:center;color:#94a3b8;font-family:sans-serif">RavenLink is shutting down…</div>';
+    };
+    fetch('/api/shutdown',{method:'POST'}).then(goodbye).catch(goodbye);
   });
 }
 
