@@ -33,7 +33,25 @@ Open `http://localhost:8080` in your browser for the dashboard.
 
 ## Configuration
 
-RavenLink reads `config.yaml` from the current directory on startup. Copy `config.yaml.example`:
+RavenLink searches for `config.yaml` in this order at startup:
+
+1. `$RAVENLINK_HOME/config.yaml` (env override for CI / custom installs)
+2. `./config.yaml` in the current working directory (terminal launches)
+3. OS-standard app directory:
+   - **macOS**: `~/Library/Application Support/RavenLink/config.yaml`
+   - **Windows**: `%APPDATA%\RavenLink\config.yaml`
+   - **Linux**: `$XDG_CONFIG_HOME/ravenlink/config.yaml` or `~/.config/ravenlink/config.yaml`
+
+On first launch with no config found, RavenLink writes a template to the OS-standard app directory, logs the path, and exits with a helpful error. Edit the template and relaunch.
+
+Logs are always written to the OS-standard location regardless of how you launch:
+- **macOS**: `~/Library/Logs/RavenLink/ravenlink.log`
+- **Windows**: `%LOCALAPPDATA%\RavenLink\ravenlink.log`
+- **Linux**: `~/.cache/ravenlink/ravenlink.log`
+
+When launched from a terminal, logs also go to stdout. When launched from Finder / Explorer / a `.app` bundle, check the log file.
+
+Example config (same format as `config.yaml.example`):
 
 ```yaml
 bridge:

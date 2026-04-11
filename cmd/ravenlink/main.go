@@ -3,10 +3,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -19,12 +22,74 @@ import (
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/ntclient"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/ntlogger"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/obsclient"
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/paths"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/statemachine"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/status"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/tray"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/typeconv"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/uploader"
 )
+
+// openLogFile creates/appends to the OS-standard log file. Returns
+// (nil, err) if the log path can't be computed — the caller should
+// fall back to stdout-only logging.
+func openLogFile() (*os.File, error) {
+	p, err := paths.LogPath()
+	if err != nil {
+		return nil, err
+	}
+	return os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+}
+
+// logFilePath returns the log file path for display purposes.
+func logFilePath() string {
+	p, err := paths.LogPath()
+	if err != nil {
+		return "(unknown)"
+	}
+	return p
+}
+
+// writeTemplateConfig writes a first-run example config.yaml to path.
+func writeTemplateConfig(path string) error {
+	tmpl := `# RavenLink first-run config template.
+# Edit this file (at minimum, set team, ravenbrain.url, and
+# ravenbrain.password) then relaunch RavenLink.
+
+bridge:
+  team: 0                       # REQUIRED: your FRC team number
+  obs_host: localhost
+  obs_port: 4455
+  obs_password: ""
+  stop_delay: 10
+  poll_interval: 0.05
+  log_level: INFO
+  record_trigger: fms           # fms | auto | any
+  auto_teleop_gap: 5
+  nt_disconnect_grace: 15
+  launch_on_login: true
+
+telemetry:
+  nt_paths:
+    - /FMSInfo/
+    - /SmartDashboard/
+    - /Shuffleboard/
+  data_dir: ./data
+  retention_days: 30
+
+ravenbrain:
+  url: ""                       # https://... (leave empty for local-only mode)
+  username: telemetry-agent
+  password: ""
+  batch_size: 500
+  upload_interval: 10
+
+dashboard:
+  enabled: true
+  port: 8080
+`
+	return os.WriteFile(path, []byte(tmpl), 0o600)
+}
 
 const Banner = `
 ╔══════════════════════════════════════╗
@@ -34,10 +99,51 @@ const Banner = `
 `
 
 func main() {
-	// Load config
+	// Resolve and chdir to the app directory so config.yaml and data/
+	// paths work regardless of whether we were launched from a terminal
+	// (cwd=project) or from Finder/Explorer (cwd=/ or $HOME).
+	appDir, err := paths.AppDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to resolve app directory: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Chdir(appDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to chdir to %s: %v\n", appDir, err)
+		os.Exit(1)
+	}
+
+	// Set up a log file in the OS-standard location so logs are
+	// available even when launched detached (no terminal attached).
+	logFile, logErr := openLogFile()
+	defer func() {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+	}()
+
+	// Load config from the (now current) app directory.
 	cfgPath := "config.yaml"
 	cfg, err := config.LoadConfig(cfgPath)
 	if err != nil {
+		// First-run bootstrap: write a template config and exit with a
+		// helpful message. Users can edit the template and re-launch.
+		if os.IsNotExist(err) || errors.Is(err, os.ErrNotExist) {
+			if writeErr := writeTemplateConfig(cfgPath); writeErr == nil {
+				msg := fmt.Sprintf(
+					"First run detected.\n"+
+						"A template config was written to:\n  %s\n"+
+						"Edit it (set team, ravenbrain credentials, etc.) and relaunch.\n"+
+						"Logs: %s\n",
+					filepath.Join(appDir, cfgPath),
+					logFilePath(),
+				)
+				fmt.Fprint(os.Stderr, msg)
+				if logFile != nil {
+					_, _ = logFile.WriteString(msg)
+				}
+				os.Exit(2)
+			}
+		}
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		fmt.Fprintln(os.Stderr, "Using defaults. Create config.yaml or pass flags.")
 		cfg = config.DefaultConfig()
@@ -48,11 +154,23 @@ func main() {
 
 	// Require team number
 	if cfg.Bridge.Team == 0 {
-		fmt.Fprintln(os.Stderr, "Error: team number is required (set in config.yaml or pass --team)")
+		msg := fmt.Sprintf(
+			"Error: team number is required.\n"+
+				"Edit: %s\n"+
+				"Or pass: --team <number>\n"+
+				"Logs:  %s\n",
+			filepath.Join(appDir, cfgPath),
+			logFilePath(),
+		)
+		fmt.Fprint(os.Stderr, msg)
+		if logFile != nil {
+			_, _ = logFile.WriteString(msg)
+		}
 		os.Exit(1)
 	}
 
-	// Set up logging
+	// Set up logging — tee to stdout AND the log file so Finder/Explorer
+	// launches still have persistent diagnostic output.
 	level := slog.LevelInfo
 	switch cfg.Bridge.LogLevel {
 	case "DEBUG":
@@ -62,7 +180,16 @@ func main() {
 	case "ERROR":
 		level = slog.LevelError
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+	var logWriter io.Writer = os.Stdout
+	if logFile != nil {
+		logWriter = io.MultiWriter(os.Stdout, logFile)
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: level})))
+	if logErr != nil {
+		slog.Warn("could not open log file", "err", logErr)
+	}
+	slog.Info("resolved app directory", "path", appDir)
+	slog.Info("log file", "path", logFilePath())
 
 	fmt.Print(Banner)
 	slog.Info("Starting RavenLink",
