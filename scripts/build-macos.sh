@@ -6,21 +6,18 @@
 # Server, so the system tray icon won't appear. A proper .app bundle
 # with LSUIElement=true makes the process a menu-bar-only accessory.
 #
-# Usage: ./scripts/build-macos.sh [--arch arm64|amd64|universal]
+# Usage: ./scripts/build-macos.sh [arm64|amd64|universal]
 #
 # Outputs:
 #   dist/RavenLink.app/Contents/MacOS/ravenlink
 #   dist/RavenLink.app/Contents/Info.plist
+#   dist/RavenLink.app/Contents/Resources/RavenLink.icns
 #
 set -euo pipefail
 
-# Ensure go is in PATH even when invoked from a non-login shell.
 export PATH="${PATH}:/usr/local/go/bin:${HOME}/go/bin:/opt/homebrew/bin"
 
 ARCH="${1:-arm64}"
-case "$ARCH" in
-  --arch) ARCH="$2" ;;
-esac
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -29,13 +26,16 @@ APP_NAME="RavenLink"
 APP_DIR="dist/${APP_NAME}.app"
 MACOS_DIR="${APP_DIR}/Contents/MacOS"
 RESOURCES_DIR="${APP_DIR}/Contents/Resources"
+ICONSET_DIR="dist/${APP_NAME}.iconset"
+ICNS_PATH="${RESOURCES_DIR}/${APP_NAME}.icns"
 BIN_NAME="ravenlink"
 
 echo "Building RavenLink for macOS (${ARCH})..."
 
-rm -rf "${APP_DIR}"
+rm -rf "${APP_DIR}" "${ICONSET_DIR}"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
 
+# --- Binary ---
 case "$ARCH" in
   arm64)
     GOARCH=arm64 CGO_ENABLED=1 go build -o "${MACOS_DIR}/${BIN_NAME}" ./cmd/ravenlink
@@ -56,6 +56,18 @@ case "$ARCH" in
     ;;
 esac
 
+# --- Icon ---
+echo "Generating icon set..."
+go run ./cmd/iconbuilder "${ICONSET_DIR}"
+
+if command -v iconutil >/dev/null 2>&1; then
+  iconutil -c icns "${ICONSET_DIR}" -o "${ICNS_PATH}"
+  echo "Wrote ${ICNS_PATH}"
+else
+  echo "warning: iconutil not found — Dock/Activity Monitor will show a generic icon"
+fi
+
+# --- Info.plist ---
 cat > "${APP_DIR}/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -79,6 +91,8 @@ cat > "${APP_DIR}/Contents/Info.plist" <<EOF
     <string>0.1.0</string>
     <key>CFBundleVersion</key>
     <string>0.1.0</string>
+    <key>CFBundleIconFile</key>
+    <string>${APP_NAME}</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <!-- LSUIElement=true makes this a menu-bar-only accessory app:
@@ -91,12 +105,11 @@ cat > "${APP_DIR}/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
+echo ""
 echo "Built ${APP_DIR}"
 echo ""
 echo "To run:"
 echo "  open ${APP_DIR}"
-echo "Or directly:"
-echo "  ${MACOS_DIR}/${BIN_NAME} --team 1310"
 echo ""
-echo "The menu bar icon should appear after 'open' because macOS will"
-echo "register the bundle with the Window Server."
+echo "On first run, RavenLink will open a browser to the dashboard"
+echo "at http://localhost:8080 for initial configuration."

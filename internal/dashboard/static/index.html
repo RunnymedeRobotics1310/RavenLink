@@ -54,8 +54,16 @@
   <span class="dot gray" id="status-dot"></span>
   <h1>RavenLink</h1>
   <span id="header-status" style="color:#94a3b8; margin-left:auto; font-size:13px;"></span>
+  <button id="btn-shutdown" title="Shut down RavenLink" style="margin-left:16px;padding:6px 12px;background:#7f1d1d;color:#fecaca;border:1px solid #991b1b;border-radius:4px;font-size:12px;cursor:pointer;">Shutdown</button>
 </div>
 <div class="container">
+  <div id="first-run-banner" class="banner warn hidden" style="margin-bottom:16px;">
+    <strong>First-run setup:</strong> RavenLink is not fully configured yet.
+    Switch to the <a href="#config" style="color:#fbbf24;text-decoration:underline;">Config tab</a>,
+    enter your team number, OBS password (if any), and RavenBrain credentials,
+    then click Save. RavenLink will restart with the new config.
+  </div>
+
   <div class="tabs">
     <div class="tab active" data-tab="status">Status</div>
     <div class="tab" data-tab="logs">Logs</div>
@@ -186,13 +194,6 @@ function loadConfig(){
         fd.className='field';
         const lb=document.createElement('label');
         lb.textContent=FIELD_DESCS[f]||f;
-        if(RESTART_FIELDS.has(f)){
-          const sp=document.createElement('span');
-          sp.className='restart-badge';
-          sp.textContent=' \u27F3 restart required';
-          sp.title='Changing this value requires restarting RavenLink to take effect.';
-          lb.appendChild(sp);
-        }
         fd.appendChild(lb);
         if(typeof val==='boolean'){
           const sel=document.createElement('select');
@@ -239,12 +240,10 @@ document.getElementById('btn-save').addEventListener('click',(ev)=>{
   ev.preventDefault();
   const form=document.getElementById('config-form');
   const data={};
-  let hasRestart=false;
   form.querySelectorAll('input,select').forEach(el=>{
     // Leave sensitive fields unchanged unless the user typed something.
     if(SENSITIVE.has(el.name)&&el.value==='')return;
     data[el.name]=el.value;
-    if(RESTART_FIELDS.has(el.name))hasRestart=true;
   });
   const saveBanner=document.getElementById('config-save-banner');
   const warnBanner=document.getElementById('config-banner');
@@ -258,16 +257,28 @@ document.getElementById('btn-save').addEventListener('click',(ev)=>{
         warnBanner.classList.remove('hidden');
         return;
       }
-      saveBanner.textContent='Config saved.';
+      saveBanner.textContent='Config saved. Restarting RavenLink to apply changes…';
       saveBanner.classList.remove('hidden');
-      setTimeout(()=>saveBanner.classList.add('hidden'),3000);
-      fetch('/api/config/reload',{method:'POST'});
-      if(hasRestart){
-        warnBanner.textContent='Some changes require restarting RavenLink to take effect.';
-        warnBanner.classList.remove('hidden');
-      }
-      // Reload the form so masked password placeholders reset.
-      loadConfig();
+      // Trigger a full restart so new config is applied cleanly.
+      // The restart endpoint responds 200, then re-execs self after a
+      // brief delay. Once the server comes back up we reload the page.
+      fetch('/api/restart',{method:'POST'})
+        .then(()=>{
+          setTimeout(()=>{
+            const poll=setInterval(()=>{
+              fetch('/api/status').then(r=>{
+                if(r.ok){
+                  clearInterval(poll);
+                  location.reload();
+                }
+              }).catch(()=>{/* server still restarting */});
+            },500);
+          },1200);
+        })
+        .catch(err=>{
+          warnBanner.textContent='Restart failed: '+err+' — save the config and manually restart.';
+          warnBanner.classList.remove('hidden');
+        });
     })
     .catch(err=>{
       warnBanner.textContent='Save failed: '+err;
@@ -275,8 +286,34 @@ document.getElementById('btn-save').addEventListener('click',(ev)=>{
     });
 });
 
+// Shutdown button in the header.
+const btnShutdown=document.getElementById('btn-shutdown');
+if(btnShutdown){
+  btnShutdown.addEventListener('click',()=>{
+    if(!confirm('Shut down RavenLink? Any pending uploads will be drained first.'))return;
+    fetch('/api/shutdown',{method:'POST'})
+      .then(()=>{
+        document.body.innerHTML='<div style="padding:40px;text-align:center;color:#94a3b8;font-family:sans-serif">RavenLink is shutting down…</div>';
+      })
+      .catch(err=>alert('Shutdown failed: '+err));
+  });
+}
+
 setInterval(()=>fetch('/api/status').then(r=>r.json()).then(updateStatus).catch(()=>{}),1000);
 fetch('/api/status').then(r=>r.json()).then(updateStatus).catch(()=>{});
+
+// First-run detection: if team===0, show the banner and auto-switch
+// to the config tab. Also honor window.location.hash = #config.
+fetch('/api/config').then(r=>r.json()).then(cfg=>{
+  if(cfg && cfg.team === 0){
+    document.getElementById('first-run-banner').classList.remove('hidden');
+    // Auto-switch to config tab
+    document.querySelector('.tab[data-tab="config"]').click();
+  }
+  if(window.location.hash === '#config'){
+    document.querySelector('.tab[data-tab="config"]').click();
+  }
+}).catch(()=>{});
 </script>
 </body>
 </html>

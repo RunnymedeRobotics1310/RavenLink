@@ -19,6 +19,7 @@ import (
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/autostart"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/config"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/dashboard"
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/lifecycle"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/ntclient"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/ntlogger"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/obsclient"
@@ -152,22 +153,12 @@ func main() {
 	// Apply CLI flag overrides
 	config.ParseFlags(cfg)
 
-	// Require team number
-	if cfg.Bridge.Team == 0 {
-		msg := fmt.Sprintf(
-			"Error: team number is required.\n"+
-				"Edit: %s\n"+
-				"Or pass: --team <number>\n"+
-				"Logs:  %s\n",
-			filepath.Join(appDir, cfgPath),
-			logFilePath(),
-		)
-		fmt.Fprint(os.Stderr, msg)
-		if logFile != nil {
-			_, _ = logFile.WriteString(msg)
-		}
-		os.Exit(1)
-	}
+	// First-run / unconfigured: if team is still 0, don't exit. Instead,
+	// start the dashboard (which always works) and auto-open the browser
+	// so the user can fill in config via the web UI. The main loop will
+	// wait until config is saved + reloaded with a valid team, then
+	// proceed to start NT/OBS/logger/uploader components.
+	firstRun := cfg.Bridge.Team == 0
 
 	// Set up logging — tee to stdout AND the log file so Finder/Explorer
 	// launches still have persistent diagnostic output.
@@ -192,13 +183,19 @@ func main() {
 	slog.Info("log file", "path", logFilePath())
 
 	fmt.Print(Banner)
-	slog.Info("Starting RavenLink",
-		"team", cfg.Bridge.Team,
-		"robot_ip", cfg.RobotIP(),
-		"obs", fmt.Sprintf("%s:%d", cfg.Bridge.OBSHost, cfg.Bridge.OBSPort),
-		"record_trigger", cfg.Bridge.RecordTrigger,
-		"data_dir", cfg.Telemetry.DataDir,
-	)
+	if firstRun {
+		slog.Warn("first run: no team configured — dashboard will open for initial setup",
+			"config", filepath.Join(appDir, cfgPath),
+		)
+	} else {
+		slog.Info("Starting RavenLink",
+			"team", cfg.Bridge.Team,
+			"robot_ip", cfg.RobotIP(),
+			"obs", fmt.Sprintf("%s:%d", cfg.Bridge.OBSHost, cfg.Bridge.OBSPort),
+			"record_trigger", cfg.Bridge.RecordTrigger,
+			"data_dir", cfg.Telemetry.DataDir,
+		)
+	}
 
 	// Auto-start registration
 	autostart.Sync(cfg.Bridge.LaunchOnLogin)
@@ -220,96 +217,115 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	quitCh := make(chan struct{}, 1)
 
+	// restartRequested is set to true by the dashboard "restart" or
+	// "save" handler. When the main goroutine reaches the end of its
+	// shutdown sequence, it re-execs self if this is true.
+	var restartRequested bool
+
 	var wg sync.WaitGroup
-
-	// NT4 client
-	nt := ntclient.New("ravenlink", 1024)
-	nt.Connect(cfg.Bridge.Team, 5810, cfg.Telemetry.NTPaths)
-	defer nt.Close()
-
-	// OBS client
-	obs := obsclient.New(cfg.Bridge.OBSHost, cfg.Bridge.OBSPort, cfg.Bridge.OBSPassword)
-	if err := obs.Connect(); err != nil {
-		slog.Warn("OBS connection failed — will retry", "err", err)
-	}
-	// Start the background health check. It pings OBS every 5 seconds with
-	// a per-call timeout and refreshes the cached IsConnected state; it
-	// also handles background reconnect attempts. The goroutine exits on
-	// ctx cancellation, so Close() below will not block.
-	obs.StartHealthCheck(ctx)
-	defer obs.Close()
-
-	// State machine
-	sm := statemachine.NewMachine(
-		statemachine.WithStopDelay(cfg.Bridge.StopDelay),
-		statemachine.WithAutoTeleopGap(cfg.Bridge.AutoTeleopGap),
-		statemachine.WithNTDisconnectGrace(cfg.Bridge.NTDisconnectGrace),
-		statemachine.WithRecordTrigger(cfg.Bridge.RecordTrigger),
+	var (
+		nt    *ntclient.Client
+		obs   *obsclient.Client
+		ntLog *ntlogger.Logger
+		up    *uploader.Uploader
+		auth  *uploader.Auth
 	)
 
-	// NT logger — fans out the single NT values channel
-	// We need to tee the channel so both state machine and logger see updates.
-	logCh := make(chan ntclient.TopicValue, 512)
-	fmsCh := make(chan ntclient.TopicValue, 64)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer close(logCh)
-		defer close(fmsCh)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case v, ok := <-nt.Values():
-				if !ok {
-					return
-				}
-				// Send to logger (drop if full)
+	// ============================================================
+	// FULL STARTUP (only when we have a valid team number)
+	// First-run mode skips all subsystems and starts only the
+	// dashboard + tray + browser so the user can configure via UI.
+	// ============================================================
+	if !firstRun {
+		// NT4 client
+		nt = ntclient.New("ravenlink", 1024)
+		nt.Connect(cfg.Bridge.Team, 5810, cfg.Telemetry.NTPaths)
+		defer nt.Close()
+
+		// OBS client
+		obs = obsclient.New(cfg.Bridge.OBSHost, cfg.Bridge.OBSPort, cfg.Bridge.OBSPassword)
+		if err := obs.Connect(); err != nil {
+			slog.Warn("OBS connection failed — will retry", "err", err)
+		}
+		obs.StartHealthCheck(ctx)
+		defer obs.Close()
+
+		// State machine
+		sm := statemachine.NewMachine(
+			statemachine.WithStopDelay(cfg.Bridge.StopDelay),
+			statemachine.WithAutoTeleopGap(cfg.Bridge.AutoTeleopGap),
+			statemachine.WithNTDisconnectGrace(cfg.Bridge.NTDisconnectGrace),
+			statemachine.WithRecordTrigger(cfg.Bridge.RecordTrigger),
+		)
+
+		// NT logger — fans out the single NT values channel.
+		logCh := make(chan ntclient.TopicValue, 512)
+		fmsCh := make(chan ntclient.TopicValue, 64)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer close(logCh)
+			defer close(fmsCh)
+			for {
 				select {
-				case logCh <- v:
-				default:
-				}
-				// Send to state machine FMS watcher (drop if full)
-				if v.Name == statemachine.FMSControlDataKey {
+				case <-ctx.Done():
+					return
+				case v, ok := <-nt.Values():
+					if !ok {
+						return
+					}
 					select {
-					case fmsCh <- v:
+					case logCh <- v:
 					default:
+					}
+					if v.Name == statemachine.FMSControlDataKey {
+						select {
+						case fmsCh <- v:
+						default:
+						}
 					}
 				}
 			}
+		}()
+
+		ntLog = ntlogger.New(logCh, cfg.Telemetry.DataDir, cfg.Bridge.Team)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ntLog.Run(ctx)
+		}()
+
+		// Uploader + auth
+		if cfg.RavenBrain.URL != "" && !strings.HasPrefix(strings.ToLower(cfg.RavenBrain.URL), "https://") {
+			slog.Warn("!!! INSECURE ravenbrain_url: credentials will NOT be sent — configure https:// to enable upload",
+				"ravenbrain_url", cfg.RavenBrain.URL,
+			)
 		}
-	}()
-
-	ntLog := ntlogger.New(logCh, cfg.Telemetry.DataDir, cfg.Bridge.Team)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ntLog.Run(ctx)
-	}()
-
-	// Uploader + auth
-	if cfg.RavenBrain.URL != "" && !strings.HasPrefix(strings.ToLower(cfg.RavenBrain.URL), "https://") {
-		slog.Warn("!!! INSECURE ravenbrain_url: credentials will NOT be sent — configure https:// to enable upload",
-			"ravenbrain_url", cfg.RavenBrain.URL,
+		auth = uploader.NewAuth(cfg.RavenBrain.URL, cfg.RavenBrain.Username, cfg.RavenBrain.Password)
+		up = uploader.New(
+			cfg.Telemetry.DataDir,
+			auth,
+			cfg.RavenBrain.BatchSize,
+			time.Duration(cfg.RavenBrain.UploadInterval*float64(time.Second)),
+			func() string { return ntLog.Stats().ActiveSessionID },
 		)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			up.Run(ctx)
+		}()
+
+		// Main loop goroutine — runs state machine + status updates
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runMainLoop(ctx, cfg, sm, nt, obs, ntLog, up, st, nil, nil, fmsCh, auth)
+		}()
 	}
-	auth := uploader.NewAuth(cfg.RavenBrain.URL, cfg.RavenBrain.Username, cfg.RavenBrain.Password)
-	// The uploader runs in its own goroutine so its (potentially slow)
-	// HTTP calls never block the main state-machine loop. It consults
-	// ntLog.Stats().ActiveSessionID to avoid uploading the session file
-	// that is currently being written.
-	up := uploader.New(
-		cfg.Telemetry.DataDir,
-		auth,
-		cfg.RavenBrain.BatchSize,
-		time.Duration(cfg.RavenBrain.UploadInterval*float64(time.Second)),
-		func() string { return ntLog.Stats().ActiveSessionID },
-	)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		up.Run(ctx)
-	}()
+
+	// ============================================================
+	// ALWAYS START: dashboard + tray + browser
+	// ============================================================
 
 	// Dashboard
 	var dash *dashboard.Server
@@ -318,6 +334,28 @@ func main() {
 			slog.Info("Config reloaded from dashboard")
 			autostart.Sync(cfg.Bridge.LaunchOnLogin)
 		})
+		// Wire lifecycle hooks: dashboard Save/Restart/Shutdown buttons.
+		// Save triggers a restart so new config is applied fresh without
+		// hot-reload complexity.
+		dash.SetLifecycleHooks(
+			func() { // shutdown
+				slog.Info("shutdown hook invoked from dashboard")
+				cancel()
+				select {
+				case quitCh <- struct{}{}:
+				default:
+				}
+			},
+			func() { // restart
+				slog.Info("restart hook invoked from dashboard")
+				restartRequested = true
+				cancel()
+				select {
+				case quitCh <- struct{}{}:
+				default:
+				}
+			},
+		)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -329,12 +367,22 @@ func main() {
 	dashboardURL := fmt.Sprintf("http://localhost:%d", cfg.Dashboard.Port)
 	trayIcon := tray.New(dashboardURL, quitCh)
 
-	// Main loop goroutine — runs state machine + upload + status updates
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		runMainLoop(ctx, cfg, sm, nt, obs, ntLog, up, st, dash, trayIcon, fmsCh, auth)
-	}()
+	// Auto-open the browser to the dashboard on startup. This gives
+	// the user a visible confirmation that RavenLink launched, and
+	// doubles as the first-run setup flow when team==0.
+	if cfg.Dashboard.Enabled {
+		go func() {
+			// Give the HTTP listener a moment to bind.
+			time.Sleep(300 * time.Millisecond)
+			if firstRun {
+				slog.Info("first run — opening browser to config wizard")
+				lifecycle.OpenBrowser(dashboardURL + "#config")
+			} else {
+				slog.Info("opening browser to dashboard", "url", dashboardURL)
+				lifecycle.OpenBrowser(dashboardURL)
+			}
+		}()
+	}
 
 	// Wait for shutdown signal
 	go func() {
@@ -342,7 +390,7 @@ func main() {
 		case <-sigCh:
 			slog.Info("Received signal, shutting down")
 		case <-quitCh:
-			slog.Info("Quit requested from tray, shutting down")
+			slog.Info("Quit requested, shutting down")
 		}
 		cancel()
 		if trayIcon != nil {
@@ -367,20 +415,33 @@ func main() {
 	// active writer, eligible for upload.
 	wg.Wait()
 
-	// Phase 2: drain any pending files with a bounded deadline. This gives
-	// the just-closed session file (plus any prior files that failed to
-	// upload) one last chance to reach RavenBrain before we exit. If the
-	// deadline expires, the files stay in pending/ and will be retried on
-	// the next startup — the upload protocol is idempotent (server tracks
-	// uploadedCount per session, so resumes skip already-committed entries).
-	const drainDeadline = 30 * time.Second
-	slog.Info("draining pending uploads before exit", "deadline", drainDeadline)
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), drainDeadline)
-	up.DrainPending(drainCtx, "")
-	drainCancel()
+	// Phase 2: drain any pending files with a bounded deadline. Skip
+	// this in first-run mode since there's no uploader to drain.
+	if up != nil {
+		const drainDeadline = 30 * time.Second
+		slog.Info("draining pending uploads before exit", "deadline", drainDeadline)
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), drainDeadline)
+		up.DrainPending(drainCtx, "")
+		drainCancel()
+		up.PruneUploaded(cfg.Telemetry.RetentionDays)
+	}
 
-	// Final cleanup
-	up.PruneUploaded(cfg.Telemetry.RetentionDays)
+	// Self-restart if requested via dashboard. This happens AFTER the
+	// full shutdown + drain sequence, so all pending data is flushed
+	// and the replacement process starts cleanly. On Unix this replaces
+	// the current process in place (syscall.Exec); on Windows it
+	// spawns a new process and exits.
+	if restartRequested {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		if err := lifecycle.RestartSelf(); err != nil {
+			slog.Error("self-restart failed", "err", err)
+			os.Exit(1)
+		}
+		// unreachable on Unix (exec replaces process)
+	}
+
 	slog.Info("Goodbye!")
 }
 

@@ -6,10 +6,13 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
+	"math"
+	"sync"
+
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/assets"
 )
 
-// Predefined icon colours. Chosen for high contrast against both light
-// and dark menu bars.
+// Predefined status ring colours that encircle the logo.
 var iconColors = map[string]color.RGBA{
 	"green":  {R: 34, G: 197, B: 94, A: 255},
 	"yellow": {R: 234, G: 179, B: 8, A: 255},
@@ -19,59 +22,83 @@ var iconColors = map[string]color.RGBA{
 
 const iconSize = 64
 
-// renderIconPNG draws the RavenLink status icon as a 64x64 PNG:
-// a filled colored circle with a thick white "R" in the center.
-// The R is drawn geometrically from filled rectangles so it renders
-// crisply even when scaled down to 16x16.
+// Decoded logo, lazily cached on first use.
+var (
+	decodedLogo     image.Image
+	decodedLogoOnce sync.Once
+)
+
+func getLogo() image.Image {
+	decodedLogoOnce.Do(func() {
+		img, err := png.Decode(bytes.NewReader(assets.Team1310Logo))
+		if err != nil {
+			decodedLogo = nil
+			return
+		}
+		decodedLogo = img
+	})
+	return decodedLogo
+}
+
+// renderIconPNG produces a 64x64 PNG that will render cleanly at
+// menu-bar sizes (16–22pt). The design:
+//
+//   - A filled circle in the status color (green/yellow/red/gray)
+//   - The team 1310 logo composited on top, scaled and centered
+//
+// For the macOS menu bar this still looks like a status indicator;
+// at Dock/Activity Monitor size the full logo is used via the .icns
+// generated separately.
 func renderIconPNG(name string) []byte {
 	fill, ok := iconColors[name]
 	if !ok {
 		fill = iconColors["gray"]
 	}
-	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
 
-	img := image.NewRGBA(image.Rect(0, 0, iconSize, iconSize))
+	canvas := image.NewRGBA(image.Rect(0, 0, iconSize, iconSize))
+	drawFilledCircle(canvas, iconSize/2, iconSize/2, (iconSize-4)/2, fill)
 
-	// 1. Background circle (status color).
-	drawFilledCircle(img, iconSize/2, iconSize/2, (iconSize-4)/2, fill)
-
-	// 2. White "R" centered in the circle.
-	//    The R occupies a ~32x36 rectangle centered at (32, 32).
-	//    Layout (with origin at top-left of the R):
-	//
-	//      ┌──────────┐
-	//      │███████   │  top bar
-	//      │██     ██ │
-	//      │██     ██ │
-	//      │███████   │  middle bar (closes the bowl)
-	//      │██  ██    │
-	//      │██    ██  │  diagonal leg
-	//      │██      ██│
-	//      └──────────┘
-	//
-	rLeft := 16
-	rTop := 14
-	rW := 32
-	rH := 36
-	stroke := 7
-
-	// Left vertical stem
-	fillRect(img, rLeft, rTop, stroke, rH, white)
-	// Top horizontal bar
-	fillRect(img, rLeft, rTop, rW-stroke, stroke, white)
-	// Top-right inner vertical (closes the top of the bowl)
-	fillRect(img, rLeft+rW-stroke-2, rTop, stroke, rH/2-stroke/2+2, white)
-	// Middle horizontal bar (closes the bowl)
-	fillRect(img, rLeft, rTop+rH/2-stroke/2, rW-stroke, stroke, white)
-	// Diagonal leg from middle-junction to bottom-right
-	drawThickLine(img,
-		rLeft+rW/2-stroke/2, rTop+rH/2+stroke/2,
-		rLeft+rW-stroke, rTop+rH,
-		stroke, white)
+	logo := getLogo()
+	if logo != nil {
+		compositeLogo(canvas, logo, iconSize)
+	}
 
 	var buf bytes.Buffer
-	_ = png.Encode(&buf, img)
+	_ = png.Encode(&buf, canvas)
 	return buf.Bytes()
+}
+
+// compositeLogo scales the team logo to fit ~70% of the canvas and
+// draws it centered. Alpha compositing over the status circle.
+func compositeLogo(dst *image.RGBA, src image.Image, size int) {
+	sb := src.Bounds()
+	srcW := sb.Dx()
+	srcH := sb.Dy()
+	target := int(float64(size) * 0.75)
+	scale := math.Min(float64(target)/float64(srcW), float64(target)/float64(srcH))
+	dstW := int(float64(srcW) * scale)
+	dstH := int(float64(srcH) * scale)
+	dstX := (size - dstW) / 2
+	dstY := (size - dstH) / 2
+
+	for y := 0; y < dstH; y++ {
+		for x := 0; x < dstW; x++ {
+			sx := sb.Min.X + int(float64(x)/scale)
+			sy := sb.Min.Y + int(float64(y)/scale)
+			if sx >= sb.Max.X {
+				sx = sb.Max.X - 1
+			}
+			if sy >= sb.Max.Y {
+				sy = sb.Max.Y - 1
+			}
+			c := src.At(sx, sy)
+			draw.Draw(dst,
+				image.Rect(dstX+x, dstY+y, dstX+x+1, dstY+y+1),
+				&image.Uniform{C: c},
+				image.Point{},
+				draw.Over)
+		}
+	}
 }
 
 // drawFilledCircle draws a filled circle using a simple distance test.
@@ -86,57 +113,4 @@ func drawFilledCircle(img *image.RGBA, cx, cy, r int, c color.RGBA) {
 			}
 		}
 	}
-}
-
-// fillRect fills an axis-aligned rectangle.
-func fillRect(img *image.RGBA, x, y, w, h int, c color.RGBA) {
-	rect := image.Rect(x, y, x+w, y+h)
-	draw.Draw(img, rect, &image.Uniform{C: c}, image.Point{}, draw.Src)
-}
-
-// drawThickLine rasterizes a line from (x0,y0) to (x1,y1) with the
-// given thickness using Bresenham. A tiny convenience for the R's leg.
-func drawThickLine(img *image.RGBA, x0, y0, x1, y1, thickness int, c color.RGBA) {
-	dx := abs(x1 - x0)
-	dy := abs(y1 - y0)
-	sx := 1
-	if x0 >= x1 {
-		sx = -1
-	}
-	sy := 1
-	if y0 >= y1 {
-		sy = -1
-	}
-	err := dx - dy
-	half := thickness / 2
-
-	for {
-		// Stamp a filled square at the current point for thickness.
-		for yy := y0 - half; yy <= y0+half; yy++ {
-			for xx := x0 - half; xx <= x0+half; xx++ {
-				if xx >= 0 && xx < iconSize && yy >= 0 && yy < iconSize {
-					img.SetRGBA(xx, yy, c)
-				}
-			}
-		}
-		if x0 == x1 && y0 == y1 {
-			return
-		}
-		e2 := 2 * err
-		if e2 > -dy {
-			err -= dy
-			x0 += sx
-		}
-		if e2 < dx {
-			err += dx
-			y0 += sy
-		}
-	}
-}
-
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
 }

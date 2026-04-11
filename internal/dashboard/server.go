@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/config"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/status"
@@ -54,12 +55,14 @@ var restartRequiredFields = []string{
 
 // Server is the embedded HTTP dashboard.
 type Server struct {
-	mu         sync.RWMutex
-	status     *status.Status
-	cfg        *config.Config
-	cfgPath    string
-	port       int
-	reloadHook func() // optional callback after config reload
+	mu           sync.RWMutex
+	status       *status.Status
+	cfg          *config.Config
+	cfgPath      string
+	port         int
+	reloadHook   func() // optional callback after config reload
+	shutdownHook func() // optional callback when /api/shutdown is hit
+	restartHook  func() // optional callback when /api/restart is hit
 }
 
 // New creates a new dashboard server.
@@ -72,6 +75,15 @@ func New(cfg *config.Config, cfgPath string, st *status.Status, reloadHook func(
 		cfgPath:    cfgPath,
 		reloadHook: reloadHook,
 	}
+}
+
+// SetLifecycleHooks wires callbacks for the Shutdown and Restart endpoints.
+// If either is nil, the corresponding endpoint returns 501 Not Implemented.
+func (s *Server) SetLifecycleHooks(shutdown, restart func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shutdownHook = shutdown
+	s.restartHook = restart
 }
 
 // UpdateStatus replaces the status pointer the dashboard serves.
@@ -100,6 +112,8 @@ func (s *Server) Start(ctx context.Context, port int) {
 	mux.HandleFunc("GET /api/config", s.handleConfigGet)
 	mux.HandleFunc("POST /api/config", s.requireSameOrigin(s.handleConfigPost))
 	mux.HandleFunc("POST /api/config/reload", s.requireSameOrigin(s.handleConfigReload))
+	mux.HandleFunc("POST /api/shutdown", s.requireSameOrigin(s.handleShutdown))
+	mux.HandleFunc("POST /api/restart", s.requireSameOrigin(s.handleRestart))
 
 	// Bind only to loopback — this dashboard is for the local user,
 	// not a service to expose on the LAN.
@@ -335,6 +349,54 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, _ *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"reloaded"}`))
+}
+
+// handleShutdown triggers a graceful shutdown. Responds 200 immediately,
+// then fires the hook in a goroutine so the client receives the response
+// before the process begins tearing down.
+func (s *Server) handleShutdown(w http.ResponseWriter, _ *http.Request) {
+	s.mu.RLock()
+	hook := s.shutdownHook
+	s.mu.RUnlock()
+	if hook == nil {
+		writeJSONError(w, http.StatusNotImplemented, "shutdown not wired")
+		return
+	}
+	slog.Info("shutdown requested via dashboard")
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"shutting down"}`))
+
+	// Flush the response before initiating shutdown so the browser sees it.
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		hook()
+	}()
+}
+
+// handleRestart triggers a graceful restart. Same pattern as shutdown:
+// respond 200, flush, then invoke the hook in a goroutine.
+func (s *Server) handleRestart(w http.ResponseWriter, _ *http.Request) {
+	s.mu.RLock()
+	hook := s.restartHook
+	s.mu.RUnlock()
+	if hook == nil {
+		writeJSONError(w, http.StatusNotImplemented, "restart not wired")
+		return
+	}
+	slog.Info("restart requested via dashboard")
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"restarting"}`))
+
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		hook()
+	}()
 }
 
 // ---------- Validation ----------
