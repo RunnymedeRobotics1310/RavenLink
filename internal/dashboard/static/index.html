@@ -9,11 +9,16 @@
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; }
   .header { background: #1e293b; padding: 16px 24px; border-bottom: 1px solid #334155; display: flex; align-items: center; gap: 12px; }
   .header h1 { font-size: 18px; font-weight: 600; }
+  .header-logo { width: 36px; height: 36px; object-fit: contain; filter: drop-shadow(0 0 6px rgba(59,130,246,0.25)); }
   .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
   .dot.green { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
   .dot.yellow { background: #eab308; box-shadow: 0 0 8px #eab308; }
   .dot.red { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
   .dot.gray { background: #6b7280; }
+  /* Small live-pulse indicator next to the header; ticks once per
+     incoming status update so the user can tell the page is live. */
+  .heartbeat { width: 8px; height: 8px; border-radius: 50%; background: #475569; transition: background 120ms, box-shadow 120ms; }
+  .heartbeat.on { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
   .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px; }
   .card { background: #1e293b; border-radius: 8px; padding: 16px; border: 1px solid #334155; }
@@ -51,8 +56,9 @@
 </head>
 <body>
 <div class="header">
-  <span class="dot gray" id="status-dot"></span>
+  <img class="header-logo" src="/logo.png" alt="Team 1310 logo">
   <h1>RavenLink</h1>
+  <span class="heartbeat" id="heartbeat" title="Live status updates"></span>
   <span id="header-status" style="color:#94a3b8; margin-left:auto; font-size:13px;"></span>
   <button id="btn-shutdown" title="Shut down RavenLink" style="margin-left:16px;padding:6px 12px;background:#7f1d1d;color:#fecaca;border:1px solid #991b1b;border-radius:4px;font-size:12px;cursor:pointer;">Shutdown</button>
 </div>
@@ -151,9 +157,19 @@ document.querySelectorAll('.tab').forEach(t=>{
 function connClass(v){return v?'ok':'err';}
 function connText(v){return v?'Connected':'Disconnected';}
 
+// Pulse the heartbeat indicator briefly on every incoming update so
+// the user can see at a glance that the page is live. The CSS class
+// toggles the dot green for ~180ms.
+function pulseHeartbeat(){
+  const hb=document.getElementById('heartbeat');
+  if(!hb)return;
+  hb.classList.add('on');
+  clearTimeout(hb._t);
+  hb._t=setTimeout(()=>hb.classList.remove('on'),180);
+}
+
 function updateStatus(d){
-  const dot=document.getElementById('status-dot');
-  dot.className='dot '+(d.nt_connected&&d.obs_connected?'green':d.nt_connected||d.obs_connected?'yellow':'red');
+  pulseHeartbeat();
   document.getElementById('header-status').textContent=d.match_state+(d.obs_recording?' | REC':'');
   document.getElementById('s-nt').className='value '+connClass(d.nt_connected);
   document.getElementById('s-nt').textContent=connText(d.nt_connected);
@@ -303,7 +319,35 @@ if(btnShutdown){
   });
 }
 
-setInterval(()=>fetch('/api/status').then(r=>r.json()).then(updateStatus).catch(()=>{}),1000);
+// Live status updates via Server-Sent Events. The server pushes a
+// JSON snapshot once per second over a single long-lived connection,
+// so the page stays current without manual reloads or repeated fetch
+// requests. If the stream drops (server restart, network hiccup), the
+// browser's EventSource will auto-reconnect; if it fails hard (older
+// browser, unexpected 4xx) we fall back to 1-second polling.
+function startStatusStream(){
+  let usedFallback=false;
+  try{
+    const es=new EventSource('/api/events');
+    es.onmessage=(ev)=>{
+      try{ updateStatus(JSON.parse(ev.data)); }
+      catch(e){ /* ignore malformed frame */ }
+    };
+    es.onerror=()=>{
+      // EventSource auto-reconnects on most errors; only fall back to
+      // polling if the stream is permanently closed.
+      if(es.readyState===EventSource.CLOSED && !usedFallback){
+        usedFallback=true;
+        setInterval(()=>fetch('/api/status').then(r=>r.json()).then(updateStatus).catch(()=>{}),1000);
+      }
+    };
+  }catch(e){
+    // EventSource not supported — pure polling fallback.
+    setInterval(()=>fetch('/api/status').then(r=>r.json()).then(updateStatus).catch(()=>{}),1000);
+  }
+}
+startStatusStream();
+// Seed the initial render immediately so there's no empty flash.
 fetch('/api/status').then(r=>r.json()).then(updateStatus).catch(()=>{});
 
 // First-run detection: if team===0, show the banner and auto-switch

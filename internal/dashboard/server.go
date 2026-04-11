@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/assets"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/config"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/status"
 )
@@ -108,7 +109,9 @@ func (s *Server) Start(ctx context.Context, port int) {
 	staticContent, _ := fs.Sub(staticFS, "static")
 	mux.Handle("GET /", http.FileServer(http.FS(staticContent)))
 
+	mux.HandleFunc("GET /logo.png", s.handleLogo)
 	mux.HandleFunc("GET /api/status", s.handleStatus)
+	mux.HandleFunc("GET /api/events", s.handleEvents)
 	mux.HandleFunc("GET /api/config", s.handleConfigGet)
 	mux.HandleFunc("POST /api/config", s.requireSameOrigin(s.handleConfigPost))
 	mux.HandleFunc("POST /api/config/reload", s.requireSameOrigin(s.handleConfigReload))
@@ -204,6 +207,73 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(data)
+}
+
+// handleLogo serves the embedded team logo so the dashboard header
+// can reference it as <img src="/logo.png">.
+func (s *Server) handleLogo(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(assets.Team1310Logo)
+}
+
+// handleEvents is a Server-Sent Events stream that pushes the full
+// status JSON once per second for the lifetime of the connection.
+// Clients (the dashboard) use EventSource to consume it; the stream
+// stays open across many ticks so the browser doesn't re-open a new
+// HTTP request every second.
+//
+// A single ticker (not change-notification) keeps the implementation
+// simple — the status fields are cheap to marshal and the dashboard
+// has no strict real-time requirements.
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering if any
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	// Send an immediate snapshot so the UI doesn't sit empty for the
+	// first tick.
+	s.writeStatusEvent(w, flusher)
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			if !s.writeStatusEvent(w, flusher) {
+				return
+			}
+		}
+	}
+}
+
+// writeStatusEvent marshals the current status and writes one SSE
+// "data:" frame. Returns false if the write failed (client gone), so
+// the caller can unwind the handler.
+func (s *Server) writeStatusEvent(w http.ResponseWriter, flusher http.Flusher) bool {
+	s.mu.RLock()
+	st := s.status
+	s.mu.RUnlock()
+
+	data, err := st.ToJSON()
+	if err != nil {
+		return true // keep the stream alive across one bad marshal
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
 }
 
 func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
