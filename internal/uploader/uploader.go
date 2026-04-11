@@ -267,11 +267,11 @@ func (u *Uploader) uploadFile(fpath string) (bool, error) {
 	// Step 1: Create or resume session (idempotent).
 	teamNum, _ := sessionMeta["team"].(float64)
 	robotIP, _ := sessionMeta["robot_ip"].(string)
-	startedAt := sessionMeta["ts"]
+	startedAt := convertLocalTimestamp(sessionMeta["ts"])
 
 	ok, err := u.postJSON("/api/telemetry/session", map[string]any{
 		"sessionId":  sessionID,
-		"teamNumber": teamNum,
+		"teamNumber": int(teamNum),
 		"robotIp":    robotIP,
 		"startedAt":  startedAt,
 	})
@@ -288,22 +288,29 @@ func (u *Uploader) uploadFile(fpath string) (bool, error) {
 		return false, err
 	}
 
-	// Collect all data entries (skip session_start).
-	var entries []json.RawMessage
+	// Collect all entries, transforming the JSONL local format into the
+	// server's API schema. Skip session_start (that metadata went into
+	// POST /session already).
+	var entries []telemetryEntryRequest
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		var peek map[string]any
-		if err := json.Unmarshal([]byte(line), &peek); err != nil {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
 			slog.Warn("uploader: skipping malformed JSONL line", "file", filepath.Base(fpath))
 			continue
 		}
-		if peek["type"] == "session_start" {
+		if raw["type"] == "session_start" {
 			continue
 		}
-		entries = append(entries, json.RawMessage(line))
+		entry, ok := jsonlToServerEntry(raw)
+		if !ok {
+			slog.Warn("uploader: skipping unrecognized JSONL line", "file", filepath.Base(fpath))
+			continue
+		}
+		entries = append(entries, entry)
 	}
 
 	// Step 3: Skip entries the server already has, upload remaining in batches.
@@ -378,8 +385,95 @@ func parseSessionStart(lines []string) map[string]any {
 	return nil
 }
 
-// findLastTimestamp returns the "ts" field from the last non-empty JSONL line.
-func findLastTimestamp(lines []string) any {
+// telemetryEntryRequest is the server's expected schema for a single entry in
+// POST /api/telemetry/session/{sessionId}/data. Field names and types must
+// match RavenBrain's TelemetryApi.TelemetryEntryRequest record.
+type telemetryEntryRequest struct {
+	Ts        string `json:"ts"`                  // ISO-8601
+	EntryType string `json:"entryType"`           // "data", "match_start", etc.
+	NtKey     string `json:"ntKey,omitempty"`     // NT topic path (data entries only)
+	NtType    string `json:"ntType,omitempty"`    // NT type name (data entries only)
+	NtValue   string `json:"ntValue,omitempty"`   // JSON-encoded value string
+	FmsRaw    *int   `json:"fmsRaw,omitempty"`    // raw FMS bitmask (markers only)
+}
+
+// jsonlToServerEntry converts a parsed JSONL line from the local log format
+// into the server's API schema. Returns false if the line is unrecognized.
+//
+// Local JSONL data entries look like:
+//
+//	{"ts": 1712678400.2, "server_ts": 5200, "key": "/x", "type": "double", "value": 3.14}
+//
+// Local JSONL markers look like:
+//
+//	{"ts": 1712678400.0, "type": "match_start", "fms_raw": 51, ...}
+//
+// Server entries (TelemetryEntryRequest) expect:
+//
+//	{"ts": "2026-04-11T...", "entryType": "data", "ntKey": "/x", "ntType": "double", "ntValue": "3.14"}
+func jsonlToServerEntry(raw map[string]any) (telemetryEntryRequest, bool) {
+	entry := telemetryEntryRequest{
+		Ts: convertLocalTimestamp(raw["ts"]),
+	}
+
+	typeField, _ := raw["type"].(string)
+	if typeField == "" {
+		return entry, false
+	}
+
+	// Markers: type field is the marker name (match_start, match_end, session_end, ...).
+	// Data entries: type field is the NT type name (double, int, string, ...).
+	// We distinguish by presence of "key".
+	if _, hasKey := raw["key"]; hasKey {
+		// Data entry
+		entry.EntryType = "data"
+		if k, ok := raw["key"].(string); ok {
+			entry.NtKey = k
+		}
+		entry.NtType = typeField
+		// Serialize value as a JSON string so the server can store any type
+		// (bool, number, string, array) uniformly in a VARCHAR/TEXT column.
+		if v, ok := raw["value"]; ok {
+			if b, err := json.Marshal(v); err == nil {
+				entry.NtValue = string(b)
+			}
+		}
+	} else {
+		// Marker (session_start handled elsewhere, session_end/match_*/etc.)
+		entry.EntryType = typeField
+		if fms, ok := raw["fms_raw"]; ok {
+			if n, ok := fms.(float64); ok {
+				v := int(n)
+				entry.FmsRaw = &v
+			}
+		}
+	}
+
+	return entry, true
+}
+
+// convertLocalTimestamp converts a local JSONL timestamp (Unix seconds with
+// fractional component, as emitted by the Go logger via time.Now().UnixMicro)
+// into an ISO-8601 string suitable for Java Instant parsing.
+func convertLocalTimestamp(ts any) string {
+	switch v := ts.(type) {
+	case float64:
+		secs := int64(v)
+		nsecs := int64((v - float64(secs)) * 1e9)
+		return time.Unix(secs, nsecs).UTC().Format(time.RFC3339Nano)
+	case int64:
+		return time.Unix(v, 0).UTC().Format(time.RFC3339Nano)
+	case string:
+		// If already a string, pass through (could already be ISO-8601 or
+		// a Unix epoch written as string).
+		return v
+	}
+	return time.Now().UTC().Format(time.RFC3339Nano)
+}
+
+// findLastTimestamp returns the "ts" field from the last non-empty JSONL line
+// converted to an ISO-8601 string for the server's completeSession endpoint.
+func findLastTimestamp(lines []string) string {
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
 		if line == "" {
@@ -390,10 +484,10 @@ func findLastTimestamp(lines []string) any {
 			continue
 		}
 		if ts, ok := entry["ts"]; ok {
-			return ts
+			return convertLocalTimestamp(ts)
 		}
 	}
-	return ""
+	return time.Now().UTC().Format(time.RFC3339Nano)
 }
 
 // getUploadedCount asks the server how many entries it already has for a session.
