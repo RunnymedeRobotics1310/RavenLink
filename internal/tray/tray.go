@@ -3,13 +3,8 @@
 package tray
 
 import (
-	"bytes"
 	"fmt"
-	"image"
-	"image/color"
-	"image/png"
 	"log/slog"
-	"math"
 	"os/exec"
 	"runtime"
 	"sync"
@@ -18,42 +13,6 @@ import (
 
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/status"
 )
-
-// predefined icon colours matching the Python implementation
-var iconColors = map[string]color.RGBA{
-	"green":  {R: 34, G: 197, B: 94, A: 255},
-	"yellow": {R: 234, G: 179, B: 8, A: 255},
-	"red":    {R: 239, G: 68, B: 68, A: 255},
-	"gray":   {R: 156, G: 163, B: 175, A: 255},
-}
-
-// makeIcon renders a 64x64 PNG of a coloured circle on a transparent
-// background, matching the Python _make_icon function.
-func makeIcon(name string) []byte {
-	const size = 64
-	const cx, cy = size / 2, size / 2
-	const r = (size - 8) / 2 // 4px padding each side
-
-	fill, ok := iconColors[name]
-	if !ok {
-		fill = iconColors["gray"]
-	}
-
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			dx := float64(x - cx)
-			dy := float64(y - cy)
-			if math.Sqrt(dx*dx+dy*dy) <= float64(r) {
-				img.SetRGBA(x, y, fill)
-			}
-		}
-	}
-
-	var buf bytes.Buffer
-	_ = png.Encode(&buf, img)
-	return buf.Bytes()
-}
 
 // Tray manages the system tray icon and its menu.
 type Tray struct {
