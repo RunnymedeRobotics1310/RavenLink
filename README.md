@@ -104,13 +104,32 @@ go build -o ravenlink ./cmd/ravenlink
 
 ### Windows
 
+`fyne.io/systray` requires CGo on Windows. You have two options:
+
+**Option A — Cross-compile from macOS/Linux (recommended for dev)**
+
+Install [Zig](https://ziglang.org/download/) (`brew install zig` on macOS), which ships with a Windows C cross-compiler out of the box. Then:
+
+```bash
+CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
+  CC="zig cc -target x86_64-windows-gnu" \
+  go build -ldflags "-H=windowsgui" -o ravenlink.exe ./cmd/ravenlink
+```
+
+The `-H=windowsgui` linker flag suppresses the console window so only the tray icon is visible when the user launches the exe.
+
+Copy `ravenlink.exe` to the DS laptop and run.
+
+**Option B — Build natively on Windows**
+
+Install Go and a C toolchain (MSYS2 / MinGW-w64 / TDM-GCC), then:
+
 ```powershell
-# Build natively on Windows
-$env:CGO_ENABLED = 1
+$env:CGO_ENABLED = "1"
 go build -ldflags "-H=windowsgui" -o ravenlink.exe ./cmd/ravenlink
 ```
 
-Cross-compile from macOS is possible but awkward — `fyne.io/systray` requires CGo which needs a Windows C cross-compiler (zig or MinGW). For releases, build natively on each platform via GitHub Actions.
+For production releases, build natively on each platform via GitHub Actions (avoids keeping a Windows toolchain on your dev machine).
 
 ## Deploying on Windows
 
