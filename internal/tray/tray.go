@@ -44,11 +44,14 @@ func New(dashboardURL string, quitCh chan<- struct{}) *Tray {
 // which itself blocks).
 //
 // On macOS, systray.Run MUST be called from the main goroutine, and
-// the process must be a proper GUI app (bundled as .app, or with
-// NSApplication.activationPolicy set to accessory). fyne.io/systray
-// handles the latter internally via a call to TransformProcessType.
+// the process must be a proper GUI app (bundled as .app). We also
+// install a small NSApplicationDelegate via CGo so:
+//   - Dock re-clicks re-open the dashboard instead of quitting the app
+//   - The app doesn't self-terminate on "last window closed" (we
+//     never have windows — the UI is in the browser and menu bar).
 func (t *Tray) Start() {
 	slog.Info("tray: starting systray event loop")
+	installAppDelegate(t.dashboardURL)
 	systray.Run(t.onReady, t.onExit)
 	slog.Info("tray: systray event loop exited")
 }
