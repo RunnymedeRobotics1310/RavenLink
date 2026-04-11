@@ -160,6 +160,34 @@ On 401: invalidate token, retry once. On network failure: exponential backoff (5
 - **Logs** — recent log output (auto-scrolling)
 - **Config** — edit all settings, save to `config.yaml`, hot-reload for supported fields
 
+## Shutting Down Gracefully
+
+RavenLink supports three shutdown paths. All three trigger a graceful drain:
+
+1. **Ctrl-C** in the terminal (SIGINT)
+2. **System tray → Quit** menu item
+3. **`kill <pid>`** or **`Stop-Process -Id <pid>`** (SIGTERM on Unix; Windows sends the tray a close signal)
+
+On any of these, RavenLink performs a two-phase shutdown:
+
+**Phase 1 — stop data collection** *(instant)*
+- Main context cancels → all goroutines exit cleanly
+- NT4 client disconnects
+- Logger flushes its bufio buffer, writes a `session_end` marker with entry count, fsyncs, and closes the active JSONL file
+- OBS recording is stopped if currently active
+
+**Phase 2 — drain pending uploads** *(up to 30 seconds)*
+- Uploader walks `data/pending/` and uploads every file (including the just-closed session) as fast as possible, ignoring the normal upload interval and backoff
+- If all files upload before the 30-second deadline, the process exits cleanly
+- If the deadline hits (slow WiFi, RavenBrain down), remaining files stay in `data/pending/` and are retried on the next startup
+
+**Tolerance of ungraceful termination** — `SIGKILL`, power loss, crash:
+
+- The JSONL file may be missing its `session_end` marker — this is **fine**. `session_end` is just another entry in the data stream; the upload protocol doesn't require it.
+- Data buffered in the `bufio.Writer` (up to a few KB) is lost — but the periodic sync ticker flushes to disk every 2 seconds, so the loss is bounded.
+- On next startup, the uploader finds the unfinished file in `data/pending/` and uploads it via the normal flow. The server tracks `uploadedCount` per session transactionally, so the upload is idempotent and resumable — no duplicate entries.
+- `POST /api/telemetry/session/{id}/complete` uses the **last timestamp in the file** as `endedAt`, which still gives RavenBrain a reasonable session boundary even without the explicit marker.
+
 ## Troubleshooting
 
 **OBS not detected**

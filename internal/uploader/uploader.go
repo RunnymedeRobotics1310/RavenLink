@@ -162,6 +162,59 @@ func (u *Uploader) MaybeUpload(activeSessionID string) {
 	}
 }
 
+// DrainPending uploads every pending file (except the active session, if any)
+// as fast as possible, ignoring the normal upload interval and backoff gates.
+// It returns when the pending directory is empty, when an upload error occurs,
+// or when ctx is cancelled (e.g., a shutdown deadline).
+//
+// This is the graceful-shutdown path: after the main loop has stopped and the
+// logger has closed its final session file, call DrainPending to flush any
+// remaining JSONL files to RavenBrain before the process exits.
+func (u *Uploader) DrainPending(ctx context.Context, activeSessionID string) {
+	if !u.auth.IsConfigured() {
+		slog.Info("uploader: drain skipped (not configured)")
+		return
+	}
+
+	// Reset backoff so a prior failure doesn't block drain.
+	u.backoff = 0
+	u.backoffUntil = time.Time{}
+
+	for {
+		if ctx.Err() != nil {
+			slog.Warn("uploader: drain deadline reached, giving up", "err", ctx.Err())
+			return
+		}
+
+		pending := u.getPendingFiles(activeSessionID)
+		if len(pending) == 0 {
+			slog.Info("uploader: drain complete, pending directory is empty")
+			return
+		}
+
+		fpath := pending[0]
+		slog.Info("uploader: draining", "file", filepath.Base(fpath), "remaining", len(pending))
+		u.CurrentlyUploading = true
+		ok, err := u.uploadFile(fpath)
+		u.CurrentlyUploading = false
+		if err != nil {
+			slog.Warn("uploader: drain upload failed — remaining files will be retried on next startup",
+				"file", filepath.Base(fpath), "err", err)
+			return
+		}
+		if ok {
+			u.moveToUploaded(fpath)
+			u.FilesUploaded++
+			u.FilesPending = max(0, u.FilesPending-1)
+			slog.Info("uploader: drained", "file", filepath.Base(fpath))
+		} else {
+			slog.Warn("uploader: drain upload returned not-ok, stopping drain",
+				"file", filepath.Base(fpath))
+			return
+		}
+	}
+}
+
 // PruneUploaded deletes files from uploaded/ that are older than
 // retentionDays. If retentionDays <= 0, no pruning is done.
 func (u *Uploader) PruneUploaded(retentionDays int) {

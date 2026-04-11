@@ -231,8 +231,26 @@ func main() {
 		go trayIcon.Start()
 	}
 
-	// Wait for all goroutines
+	// Wait for all goroutines to exit cleanly. At this point:
+	//   - The NT client has stopped
+	//   - The logger has flushed its bufio.Writer, written a session_end
+	//     marker, and closed its JSONL file (via the defer in Run())
+	//   - The uploader goroutine has exited its ticker loop
+	// The most recent session file is now sitting in data/pending/ with no
+	// active writer, eligible for upload.
 	wg.Wait()
+
+	// Phase 2: drain any pending files with a bounded deadline. This gives
+	// the just-closed session file (plus any prior files that failed to
+	// upload) one last chance to reach RavenBrain before we exit. If the
+	// deadline expires, the files stay in pending/ and will be retried on
+	// the next startup — the upload protocol is idempotent (server tracks
+	// uploadedCount per session, so resumes skip already-committed entries).
+	const drainDeadline = 30 * time.Second
+	slog.Info("draining pending uploads before exit", "deadline", drainDeadline)
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), drainDeadline)
+	up.DrainPending(drainCtx, "")
+	drainCancel()
 
 	// Final cleanup
 	up.PruneUploaded(cfg.Telemetry.RetentionDays)
