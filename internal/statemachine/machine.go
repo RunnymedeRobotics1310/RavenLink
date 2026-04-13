@@ -117,6 +117,11 @@ func (m *Machine) shouldStartRecording(fms FMSState) bool {
 	}
 }
 
+// Reset returns the machine to Idle and clears every internal timer. Use
+// this when an external signal (e.g. a user pause) forces the machine to
+// abandon its current session regardless of FMS state.
+func (m *Machine) Reset() { m.reset() }
+
 func (m *Machine) reset() {
 	m.State = Idle
 	m.disabledAt = nil

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/assets"
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/collect"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/config"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/status"
 )
@@ -42,6 +43,7 @@ var restartRequiredFields = []string{
 	"auto_teleop_gap",
 	"nt_disconnect_grace",
 	"record_trigger",
+	"collect_trigger",
 	"nt_paths",
 	"data_dir",
 	"retention_days",
@@ -64,6 +66,7 @@ type Server struct {
 	reloadHook   func() // optional callback after config reload
 	shutdownHook func() // optional callback when /api/shutdown is hit
 	restartHook  func() // optional callback when /api/restart is hit
+	collect      *collect.State // optional: wired by SetCollectState
 }
 
 // New creates a new dashboard server.
@@ -85,6 +88,14 @@ func (s *Server) SetLifecycleHooks(shutdown, restart func()) {
 	defer s.mu.Unlock()
 	s.shutdownHook = shutdown
 	s.restartHook = restart
+}
+
+// SetCollectState wires the pause flag used by /api/collect/pause and
+// /api/collect/resume. If not set, those endpoints return 501.
+func (s *Server) SetCollectState(c *collect.State) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.collect = c
 }
 
 // UpdateStatus replaces the status pointer the dashboard serves.
@@ -117,6 +128,8 @@ func (s *Server) Start(ctx context.Context, port int) {
 	mux.HandleFunc("POST /api/config/reload", s.requireSameOrigin(s.handleConfigReload))
 	mux.HandleFunc("POST /api/shutdown", s.requireSameOrigin(s.handleShutdown))
 	mux.HandleFunc("POST /api/restart", s.requireSameOrigin(s.handleRestart))
+	mux.HandleFunc("POST /api/collect/pause", s.requireSameOrigin(s.handleCollectPause))
+	mux.HandleFunc("POST /api/collect/resume", s.requireSameOrigin(s.handleCollectResume))
 
 	// Bind only to loopback — this dashboard is for the local user,
 	// not a service to expose on the LAN.
@@ -302,6 +315,7 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 		"auto_teleop_gap":            cfg.Bridge.AutoTeleopGap,
 		"nt_disconnect_grace":        cfg.Bridge.NTDisconnectGrace,
 		"record_trigger":             cfg.Bridge.RecordTrigger,
+		"collect_trigger":            cfg.Bridge.CollectTrigger,
 		"launch_on_login":            cfg.Bridge.LaunchOnLogin,
 		"nt_paths":                   strings.Join(cfg.Telemetry.NTPaths, ", "),
 		"data_dir":                   cfg.Telemetry.DataDir,
@@ -361,6 +375,8 @@ func (s *Server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 			cfg.Bridge.NTDisconnectGrace = toFloat(val, cfg.Bridge.NTDisconnectGrace)
 		case "record_trigger":
 			cfg.Bridge.RecordTrigger = val
+		case "collect_trigger":
+			cfg.Bridge.CollectTrigger = val
 		case "launch_on_login":
 			cfg.Bridge.LaunchOnLogin = toBool(val)
 		case "nt_paths":
@@ -478,6 +494,41 @@ func (s *Server) handleRestart(w http.ResponseWriter, _ *http.Request) {
 	}()
 }
 
+// handleCollectPause flips the shared collect.State to paused. The main
+// loop observes this flag each tick and ends the active NT logger
+// session; the uploader observes it at every MaybeUpload call and skips
+// network I/O. The flag is NOT persisted — on restart, collection is
+// always enabled.
+func (s *Server) handleCollectPause(w http.ResponseWriter, _ *http.Request) {
+	s.mu.RLock()
+	c := s.collect
+	s.mu.RUnlock()
+	if c == nil {
+		writeJSONError(w, http.StatusNotImplemented, "collect state not wired")
+		return
+	}
+	c.Pause()
+	slog.Info("collection paused via dashboard")
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"paused"}`))
+}
+
+// handleCollectResume clears the pause flag so the next main-loop tick
+// resumes NT logging and upload.
+func (s *Server) handleCollectResume(w http.ResponseWriter, _ *http.Request) {
+	s.mu.RLock()
+	c := s.collect
+	s.mu.RUnlock()
+	if c == nil {
+		writeJSONError(w, http.StatusNotImplemented, "collect state not wired")
+		return
+	}
+	c.Resume()
+	slog.Info("collection resumed via dashboard")
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"resumed"}`))
+}
+
 // ---------- Validation ----------
 
 // validateConfigPost checks every known field present in data against the
@@ -523,6 +574,14 @@ func validateConfigPost(data map[string]any) error {
 		case "fms", "auto", "any":
 		default:
 			return fmt.Errorf("record_trigger must be one of fms, auto, any")
+		}
+	}
+	if v, ok := data["collect_trigger"]; ok {
+		s := fmt.Sprintf("%v", v)
+		switch s {
+		case "fms", "auto", "any":
+		default:
+			return fmt.Errorf("collect_trigger must be one of fms, auto, any")
 		}
 	}
 	if v, ok := data["team"]; ok {

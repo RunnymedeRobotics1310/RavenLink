@@ -12,14 +12,6 @@ import (
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/assets"
 )
 
-// Predefined status ring colours that encircle the logo.
-var iconColors = map[string]color.RGBA{
-	"green":  {R: 34, G: 197, B: 94, A: 255},
-	"yellow": {R: 234, G: 179, B: 8, A: 255},
-	"red":    {R: 239, G: 68, B: 68, A: 255},
-	"gray":   {R: 156, G: 163, B: 175, A: 255},
-}
-
 const iconSize = 64
 
 // Decoded logo, lazily cached on first use.
@@ -49,14 +41,8 @@ func getLogo() image.Image {
 // For the macOS menu bar this still looks like a status indicator;
 // at Dock/Activity Monitor size the full logo is used via the .icns
 // generated separately.
-func renderIconPNG(name string) []byte {
-	fill, ok := iconColors[name]
-	if !ok {
-		fill = iconColors["gray"]
-	}
-
+func renderIconPNG(_ string) []byte {
 	canvas := image.NewRGBA(image.Rect(0, 0, iconSize, iconSize))
-	drawFilledCircle(canvas, iconSize/2, iconSize/2, (iconSize-4)/2, fill)
 
 	logo := getLogo()
 	if logo != nil {
@@ -126,7 +112,7 @@ func compositeLogo(dst *image.RGBA, src image.Image, size int) {
 	sb := src.Bounds()
 	srcW := sb.Dx()
 	srcH := sb.Dy()
-	target := int(float64(size) * 0.75)
+	target := int(float64(size) * 0.92)
 	scale := math.Min(float64(target)/float64(srcW), float64(target)/float64(srcH))
 	dstW := int(float64(srcW) * scale)
 	dstH := int(float64(srcH) * scale)

@@ -60,7 +60,8 @@
   <h1>RavenLink</h1>
   <span class="heartbeat" id="heartbeat" title="Live status updates"></span>
   <span id="header-status" style="color:#94a3b8; margin-left:auto; font-size:13px;"></span>
-  <button id="btn-shutdown" title="Shut down RavenLink" style="margin-left:16px;padding:6px 12px;background:#7f1d1d;color:#fecaca;border:1px solid #991b1b;border-radius:4px;font-size:12px;cursor:pointer;">Shutdown</button>
+  <button id="btn-collect" title="Pause or resume NT data collection and upload" style="margin-left:16px;padding:6px 12px;background:#1e3a8a;color:#dbeafe;border:1px solid #1d4ed8;border-radius:4px;font-size:12px;cursor:pointer;">Pause Collection</button>
+  <button id="btn-shutdown" title="Shut down RavenLink" style="margin-left:8px;padding:6px 12px;background:#7f1d1d;color:#fecaca;border:1px solid #991b1b;border-radius:4px;font-size:12px;cursor:pointer;">Shutdown</button>
 </div>
 <div class="container">
   <div id="first-run-banner" class="banner warn hidden" style="margin-bottom:16px;">
@@ -97,6 +98,12 @@
         <div class="stat"><span class="label">Topics</span><span class="value" id="s-topics">&mdash;</span></div>
       </div>
       <div class="card">
+        <h2>Collection</h2>
+        <div class="stat"><span class="label">Trigger</span><span class="value" id="s-ctrig">&mdash;</span></div>
+        <div class="stat"><span class="label">Paused</span><span class="value" id="s-cpaused">&mdash;</span></div>
+        <div class="stat"><span class="label">Active</span><span class="value" id="s-cactive">&mdash;</span></div>
+      </div>
+      <div class="card">
         <h2>Upload</h2>
         <div class="stat"><span class="label">Pending</span><span class="value" id="s-pending">&mdash;</span></div>
         <div class="stat"><span class="label">Uploaded</span><span class="value" id="s-uploaded">&mdash;</span></div>
@@ -123,7 +130,7 @@
 // list covers every field except the two actual hot-reloadable ones.
 let RESTART_FIELDS = new Set([
   'team','obs_host','obs_port','obs_password','stop_delay','poll_interval',
-  'auto_teleop_gap','nt_disconnect_grace','record_trigger','nt_paths','data_dir',
+  'auto_teleop_gap','nt_disconnect_grace','record_trigger','collect_trigger','nt_paths','data_dir',
   'retention_days','ravenbrain_url','ravenbrain_username','ravenbrain_password',
   'ravenbrain_batch_size','ravenbrain_upload_interval','dashboard_enabled','dashboard_port'
 ]);
@@ -131,14 +138,15 @@ const FIELD_DESCS = {
   team:'Team number',obs_host:'OBS host',obs_port:'OBS port',obs_password:'OBS password',
   stop_delay:'Stop delay (s)',poll_interval:'Poll interval (s)',log_level:'Log level',
   auto_teleop_gap:'Auto-teleop gap (s)',nt_disconnect_grace:'NT disconnect grace (s)',
-  record_trigger:'Record trigger',launch_on_login:'Launch on login',nt_paths:'NT path prefixes',data_dir:'Data directory',
+  record_trigger:'Record trigger',collect_trigger:'Collect trigger',launch_on_login:'Launch on login',nt_paths:'NT path prefixes',data_dir:'Data directory',
   retention_days:'Retention (days)',ravenbrain_url:'RavenBrain URL',ravenbrain_username:'RavenBrain user',ravenbrain_password:'RavenBrain password',
   ravenbrain_batch_size:'Batch size',ravenbrain_upload_interval:'Upload interval (s)',
   dashboard_enabled:'Dashboard enabled',dashboard_port:'Dashboard port'
 };
+const TRIGGER_SELECTS = new Set(['record_trigger','collect_trigger']);
 const SENSITIVE = new Set(['obs_password','ravenbrain_password']);
 const MASKED = '***';
-const SECTIONS = {bridge:['team','obs_host','obs_port','obs_password','stop_delay','poll_interval','log_level','auto_teleop_gap','nt_disconnect_grace','record_trigger','launch_on_login'],
+const SECTIONS = {bridge:['team','obs_host','obs_port','obs_password','stop_delay','poll_interval','log_level','auto_teleop_gap','nt_disconnect_grace','record_trigger','collect_trigger','launch_on_login'],
   telemetry:['nt_paths','data_dir','retention_days'],
   ravenbrain:['ravenbrain_url','ravenbrain_username','ravenbrain_password','ravenbrain_batch_size','ravenbrain_upload_interval'],
   dashboard:['dashboard_enabled','dashboard_port']};
@@ -187,6 +195,29 @@ function updateStatus(d){
   document.getElementById('s-pending').textContent=d.files_pending;
   document.getElementById('s-uploaded').textContent=d.files_uploaded;
   document.getElementById('s-ulstatus').textContent=d.currently_uploading?'Uploading...':(d.last_upload_result||'Idle');
+  document.getElementById('s-ctrig').textContent=d.collect_trigger||'—';
+  const cp=document.getElementById('s-cpaused');
+  cp.textContent=d.collect_paused?'Yes':'No';
+  cp.className='value '+(d.collect_paused?'warn':'ok');
+  const ca=document.getElementById('s-cactive');
+  ca.textContent=d.collect_active?'Yes':'No';
+  ca.className='value '+(d.collect_active?'ok':'');
+  // Reflect pause state in the header button so the user always sees
+  // the current action (the button flips labels + colors).
+  const bc=document.getElementById('btn-collect');
+  if(bc){
+    if(d.collect_paused){
+      bc.textContent='Resume Collection';
+      bc.style.background='#713f12';
+      bc.style.borderColor='#854d0e';
+      bc.style.color='#fde68a';
+    }else{
+      bc.textContent='Pause Collection';
+      bc.style.background='#1e3a8a';
+      bc.style.borderColor='#1d4ed8';
+      bc.style.color='#dbeafe';
+    }
+  }
   document.getElementById('log-output').textContent=(d.recent_logs||[]).join('\n');
   const lb=document.getElementById('log-output');
   lb.scrollTop=lb.scrollHeight;
@@ -216,7 +247,7 @@ function loadConfig(){
           sel.name=f;
           sel.innerHTML='<option value="true"'+(val?' selected':'')+'>true</option><option value="false"'+(!val?' selected':'')+'>false</option>';
           fd.appendChild(sel);
-        }else if(f==='record_trigger'){
+        }else if(TRIGGER_SELECTS.has(f)){
           const sel=document.createElement('select');
           sel.name=f;
           [['fms','FMS only (competition)'],['auto','Auto mode (practice + competition)'],['any','Any enable']].forEach(([v,l])=>{sel.innerHTML+='<option value="'+v+'"'+(v===val?' selected':'')+'>'+l+'</option>';});
@@ -301,6 +332,22 @@ document.getElementById('btn-save').addEventListener('click',(ev)=>{
       warnBanner.classList.remove('hidden');
     });
 });
+
+// Pause / resume collection button. We don't know which action applies
+// until we look at the most recent status snapshot — read the current
+// label text to decide which endpoint to hit.
+const btnCollect=document.getElementById('btn-collect');
+if(btnCollect){
+  btnCollect.addEventListener('click',()=>{
+    const paused=btnCollect.textContent.trim().toLowerCase().startsWith('resume');
+    const url=paused?'/api/collect/resume':'/api/collect/pause';
+    fetch(url,{method:'POST'}).then(r=>r.json()).then(()=>{
+      // The next SSE tick will update the button and status card.
+    }).catch(err=>{
+      alert('Failed: '+err);
+    });
+  });
+}
 
 // Shutdown button in the header.
 const btnShutdown=document.getElementById('btn-shutdown');

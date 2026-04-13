@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/autostart"
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/collect"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/config"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/dashboard"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/lifecycle"
@@ -65,7 +66,8 @@ bridge:
   stop_delay: 10
   poll_interval: 0.05
   log_level: INFO
-  record_trigger: fms           # fms | auto | any
+  record_trigger: fms           # fms | auto | any — when to run OBS
+  collect_trigger: fms          # fms | auto | any — when to log/upload NT data
   auto_teleop_gap: 5
   nt_disconnect_grace: 15
   launch_on_login: true
@@ -203,6 +205,11 @@ func main() {
 	// Shared status
 	st := status.New()
 
+	// Runtime pause flag for NT data collection + RavenBrain upload.
+	// Shared between main loop (drives session lifecycle), uploader
+	// (gates HTTP transmission), and dashboard (Pause/Resume buttons).
+	collectState := collect.NewState()
+
 	// Create data directory
 	if err := os.MkdirAll(cfg.Telemetry.DataDir, 0o755); err != nil {
 		slog.Error("Failed to create data dir", "err", err)
@@ -230,7 +237,12 @@ func main() {
 		up    *uploader.Uploader
 		auth  *uploader.Auth
 		sm    *statemachine.Machine
-		fmsCh chan ntclient.TopicValue
+		// collectSM drives NT logger session lifecycle + uploader gating.
+		// It's a second statemachine.Machine running in parallel with sm,
+		// configured with its own trigger mode so data collection can be
+		// scoped differently from OBS recording.
+		collectSM *statemachine.Machine
+		fmsCh     chan ntclient.TopicValue
 	)
 
 	// ============================================================
@@ -252,12 +264,23 @@ func main() {
 		obs.StartHealthCheck(ctx)
 		defer obs.Close()
 
-		// State machine
+		// State machine (OBS recording)
 		sm = statemachine.NewMachine(
 			statemachine.WithStopDelay(cfg.Bridge.StopDelay),
 			statemachine.WithAutoTeleopGap(cfg.Bridge.AutoTeleopGap),
 			statemachine.WithNTDisconnectGrace(cfg.Bridge.NTDisconnectGrace),
 			statemachine.WithRecordTrigger(cfg.Bridge.RecordTrigger),
+		)
+
+		// Second state machine for NT data collection. Reuses all of the
+		// same gap/stop-delay/NT-grace handling as OBS recording, but with
+		// an independent trigger so you can (e.g.) collect only during
+		// FMS matches while leaving OBS on "any".
+		collectSM = statemachine.NewMachine(
+			statemachine.WithStopDelay(cfg.Bridge.StopDelay),
+			statemachine.WithAutoTeleopGap(cfg.Bridge.AutoTeleopGap),
+			statemachine.WithNTDisconnectGrace(cfg.Bridge.NTDisconnectGrace),
+			statemachine.WithRecordTrigger(cfg.Bridge.CollectTrigger),
 		)
 
 		// NT logger — fans out the single NT values channel.
@@ -311,6 +334,7 @@ func main() {
 			time.Duration(cfg.RavenBrain.UploadInterval*float64(time.Second)),
 			func() string { return ntLog.Stats().ActiveSessionID },
 		)
+		up.SetPauseFn(collectState.Paused)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -329,6 +353,7 @@ func main() {
 			slog.Info("Config reloaded from dashboard")
 			autostart.Sync(cfg.Bridge.LaunchOnLogin)
 		})
+		dash.SetCollectState(collectState)
 		// Wire lifecycle hooks: dashboard Save/Restart/Shutdown buttons.
 		// Save triggers a restart so new config is applied fresh without
 		// hot-reload complexity.
@@ -370,7 +395,7 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runMainLoop(ctx, cfg, sm, nt, obs, ntLog, up, st, dash, trayIcon, fmsCh, auth)
+			runMainLoop(ctx, cfg, sm, collectSM, collectState, nt, obs, ntLog, up, st, dash, trayIcon, fmsCh)
 		}()
 	}
 
@@ -464,6 +489,8 @@ func runMainLoop(
 	ctx context.Context,
 	cfg *config.Config,
 	sm *statemachine.Machine,
+	collectSM *statemachine.Machine,
+	collectState *collect.State,
 	nt *ntclient.Client,
 	obs *obsclient.Client,
 	ntLog *ntlogger.Logger,
@@ -472,7 +499,6 @@ func runMainLoop(
 	dash *dashboard.Server,
 	trayIcon *tray.Tray,
 	fmsCh <-chan ntclient.TopicValue,
-	auth *uploader.Auth,
 ) {
 	pollInterval := time.Duration(cfg.Bridge.PollInterval * float64(time.Second))
 	if pollInterval < 10*time.Millisecond {
@@ -494,10 +520,6 @@ func runMainLoop(
 	var fms statemachine.FMSState = statemachine.FMSStateDisconnected()
 	prevState := statemachine.Idle
 	lastEntries := 0
-	// Track NT connectivity transitions so we can drive session lifecycle.
-	// Start as "not yet connected" so the first observed true flips to
-	// StartSession.
-	prevNTConnected := false
 
 	for {
 		select {
@@ -521,21 +543,47 @@ func runMainLoop(
 			}
 
 		case <-ticker.C:
-			// Drive logger session lifecycle from NT connectivity edges.
 			ntConnected := nt.Connected()
-			if ntConnected && !prevNTConnected {
-				slog.Info("NT connected — starting telemetry session")
-				ntLog.StartSession()
-			} else if !ntConnected && prevNTConnected {
-				slog.Info("NT disconnected — ending telemetry session")
-				ntLog.EndSession()
-			}
-			prevNTConnected = ntConnected
 
 			// Update state machine
 			if !ntConnected {
 				fms = statemachine.FMSStateDisconnected()
 			}
+
+			// Failsafe: a paused session always auto-resumes when we see
+			// a live FMS match starting up. Collection data for real
+			// matches is too important to rely on the user remembering
+			// to unpause.
+			if collectState.Paused() && fms.Enabled && fms.FMSAttached {
+				slog.Info("collection auto-resumed: FMS match detected")
+				collectState.Resume()
+			}
+
+			// Drive NT logger session lifecycle from the collection
+			// state machine. Its StartRecord/StopRecord actions become
+			// StartSession/EndSession on the ntLogger.
+			if collectState.Paused() {
+				// Force the collect machine and the logger back to idle
+				// while paused. Values continue flowing through the
+				// channel (so NT stays responsive) but ntLogger drops
+				// them because its file handle is nil.
+				if collectSM.State != statemachine.Idle {
+					collectSM.Reset()
+					ntLog.EndSession()
+				}
+			} else {
+				for _, action := range collectSM.Update(fms) {
+					switch action {
+					case statemachine.StartRecord:
+						slog.Info("collection started", "trigger", cfg.Bridge.CollectTrigger)
+						ntLog.StartSession()
+					case statemachine.StopRecord:
+						slog.Info("collection stopped")
+						ntLog.EndSession()
+					}
+				}
+			}
+
 			actions := sm.Update(fms)
 
 			// Match markers on state transitions
@@ -577,7 +625,7 @@ func runMainLoop(
 			st.Update(func(s *status.Status) {
 				s.NTConnected = nt.Connected()
 				s.OBSConnected = obs.IsConnected()
-				s.RavenBrainReachable = auth.IsConfigured()
+				s.RavenBrainReachable = up.Reachable
 				s.MatchState = stateName(sm.State)
 				s.ActiveSessionFile = stats.ActiveSessionID
 				s.EntriesWritten = stats.EntriesWritten
@@ -586,6 +634,11 @@ func runMainLoop(
 				s.LastUploadResult = up.LastUploadResult
 				s.CurrentlyUploading = up.CurrentlyUploading
 				s.OBSRecording = sm.State == statemachine.RecordingAuto || sm.State == statemachine.RecordingTeleop
+				s.CollectTrigger = cfg.Bridge.CollectTrigger
+				s.CollectPaused = collectState.Paused()
+				s.CollectActive = !collectState.Paused() &&
+					(collectSM.State == statemachine.RecordingAuto ||
+						collectSM.State == statemachine.RecordingTeleop)
 			})
 			if dash != nil {
 				dash.UpdateStatus(st)

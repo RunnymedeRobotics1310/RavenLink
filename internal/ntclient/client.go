@@ -224,8 +224,18 @@ func (c *Client) session(ctx context.Context) (connected bool, err error) {
 	// Topic ID -> topic metadata map, built from announce messages.
 	topics := make(map[int]topicInfo)
 
+	// Read timeout: if no frame arrives within this window, assume the
+	// connection is dead and bail out. The roboRIO sends NT4 updates
+	// frequently (FMSControlData alone ticks at ~20 Hz), so 5 s of
+	// silence is a strong signal the peer is gone. Without this, a
+	// powered-off robot leaves conn.Read blocking on a half-open TCP
+	// socket for minutes until the OS-level keepalive gives up.
+	const readTimeout = 5 * time.Second
+
 	for {
-		typ, data, err := conn.Read(ctx)
+		readCtx, readCancel := context.WithTimeout(ctx, readTimeout)
+		typ, data, err := conn.Read(readCtx)
+		readCancel()
 		if err != nil {
 			return true, fmt.Errorf("read: %w", err)
 		}

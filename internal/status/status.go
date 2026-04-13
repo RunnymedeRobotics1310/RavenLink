@@ -38,6 +38,11 @@ type Status struct {
 	// OBS
 	OBSRecording bool `json:"obs_recording"`
 
+	// Collection (NT data retrieval + upload)
+	CollectTrigger string `json:"collect_trigger"`
+	CollectPaused  bool   `json:"collect_paused"`
+	CollectActive  bool   `json:"collect_active"`
+
 	// Log buffer
 	RecentLogs []string `json:"recent_logs"`
 }

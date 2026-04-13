@@ -34,6 +34,7 @@ type BridgeConfig struct {
 	PollInterval      float64 `yaml:"poll_interval"`
 	LogLevel          string  `yaml:"log_level"`
 	RecordTrigger     string  `yaml:"record_trigger"`
+	CollectTrigger    string  `yaml:"collect_trigger"`
 	LaunchOnLogin     bool    `yaml:"launch_on_login"`
 	AutoTeleopGap     float64 `yaml:"auto_teleop_gap"`
 	NTDisconnectGrace float64 `yaml:"nt_disconnect_grace"`
@@ -73,6 +74,7 @@ func DefaultConfig() *Config {
 			PollInterval:      0.05,
 			LogLevel:          "INFO",
 			RecordTrigger:     "fms",
+			CollectTrigger:    "fms",
 			LaunchOnLogin:     true,
 			AutoTeleopGap:     5,
 			NTDisconnectGrace: 15,
@@ -108,6 +110,11 @@ func LoadConfig(path string) (*Config, error) {
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config YAML: %w", err)
+	}
+
+	// Backfill fields missing from older config files.
+	if cfg.Bridge.CollectTrigger == "" {
+		cfg.Bridge.CollectTrigger = "fms"
 	}
 
 	return cfg, nil
@@ -217,6 +224,7 @@ func ParseFlags(cfg *Config) {
 	pollInterval := fs.Float64("poll-interval", cfg.Bridge.PollInterval, "Poll interval in seconds")
 	logLevel := fs.String("log-level", cfg.Bridge.LogLevel, "Log level (DEBUG, INFO, WARNING, ERROR)")
 	recordTrigger := fs.String("record-trigger", cfg.Bridge.RecordTrigger, "When to record: fms, auto, any")
+	collectTrigger := fs.String("collect-trigger", cfg.Bridge.CollectTrigger, "When to collect NT data + upload: fms, auto, any")
 	noLaunchOnLogin := fs.Bool("no-launch-on-login", false, "Disable launch-on-login registration")
 	autoTeleopGap := fs.Float64("auto-teleop-gap", cfg.Bridge.AutoTeleopGap, "Max seconds of disabled between auto and teleop before stopping")
 	ntDisconnectGrace := fs.Float64("nt-disconnect-grace", cfg.Bridge.NTDisconnectGrace, "Grace period (seconds) before treating NT disconnect as match over")
@@ -259,6 +267,7 @@ func ParseFlags(cfg *Config) {
 	cfg.Bridge.PollInterval = *pollInterval
 	cfg.Bridge.LogLevel = *logLevel
 	cfg.Bridge.RecordTrigger = *recordTrigger
+	cfg.Bridge.CollectTrigger = *collectTrigger
 	cfg.Bridge.AutoTeleopGap = *autoTeleopGap
 	cfg.Bridge.NTDisconnectGrace = *ntDisconnectGrace
 

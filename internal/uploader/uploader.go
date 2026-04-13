@@ -39,6 +39,12 @@ type Uploader struct {
 	// mid-match file is not uploaded before it is complete. May be nil.
 	activeSessionFn func() string
 
+	// pausedFn, if non-nil, is consulted at the top of every upload
+	// attempt. When it returns true the uploader skips the tick entirely
+	// — no network activity, no file movement. Used by the dashboard's
+	// Pause Collection button.
+	pausedFn func() bool
+
 	pendingDir  string
 	uploadedDir string
 
@@ -54,6 +60,10 @@ type Uploader struct {
 	CurrentlyUploading bool
 	// LastUploadResult describes the outcome of the most recent upload attempt.
 	LastUploadResult string
+	// Reachable reflects whether the most recent HTTP interaction with
+	// RavenBrain succeeded. Updated on every upload tick: from upload
+	// results when files are pending, or from a lightweight ping when idle.
+	Reachable bool
 }
 
 // New creates an Uploader. dataDir must contain pending/ and uploaded/
@@ -118,24 +128,40 @@ func (u *Uploader) Run(ctx context.Context) {
 	}
 }
 
+// SetPauseFn registers a predicate that gates all scheduled uploads.
+// When the predicate returns true, MaybeUpload returns immediately.
+// DrainPending is NOT gated — shutdown drain must always flush files
+// that were written before the pause.
+func (u *Uploader) SetPauseFn(fn func() bool) { u.pausedFn = fn }
+
 // MaybeUpload checks for pending files and uploads the oldest one,
 // skipping any file whose name contains activeSessionID (the currently
 // recording session). It respects the upload interval and backoff timers.
+//
+// When no files are pending, a lightweight ping checks server
+// reachability so the dashboard stays current even when idle.
 func (u *Uploader) MaybeUpload(activeSessionID string) {
 	if !u.auth.IsConfigured() {
+		u.Reachable = false
 		return
 	}
 
-	now := time.Now()
-
-	if now.Before(u.backoffUntil) {
+	if u.pausedFn != nil && u.pausedFn() {
 		return
 	}
 
 	pending := u.getPendingFiles(activeSessionID)
 	u.FilesPending = len(pending)
 
+	// No files to upload — ping the server so the dashboard's
+	// reachability indicator stays fresh.
 	if len(pending) == 0 {
+		u.Reachable = u.ping()
+		return
+	}
+
+	// Backoff only gates upload attempts, not the idle ping above.
+	if time.Now().Before(u.backoffUntil) {
 		return
 	}
 
@@ -145,11 +171,14 @@ func (u *Uploader) MaybeUpload(activeSessionID string) {
 
 	ok, err := u.uploadFile(fpath)
 	if err != nil {
+		u.Reachable = false
 		slog.Warn("uploader: upload failed", "file", filepath.Base(fpath), "err", err)
 		u.LastUploadResult = fmt.Sprintf("ERROR: %v", err)
 		u.applyBackoff()
 		return
 	}
+	// Got an HTTP response — server is reachable regardless of status code.
+	u.Reachable = true
 	if ok {
 		u.moveToUploaded(fpath)
 		u.FilesUploaded++
@@ -244,6 +273,26 @@ func (u *Uploader) PruneUploaded(retentionDays int) {
 			_ = os.Remove(fpath)
 		}
 	}
+}
+
+// ping checks if the RavenBrain server is network-reachable by sending
+// a lightweight HEAD request. Any HTTP response (even 4xx/5xx) counts
+// as reachable; only connection/timeout errors are treated as unreachable.
+func (u *Uploader) ping() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, u.auth.BaseURL(), nil)
+	if err != nil {
+		return false
+	}
+
+	resp, err := u.httpClient.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return true
 }
 
 // getPendingFiles returns JSONL files in pending/ sorted oldest-first,
