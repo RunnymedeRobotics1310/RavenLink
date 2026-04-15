@@ -71,9 +71,9 @@ func (t *Tray) onReady() {
 	// grays out the entire item including colored emoji, making the
 	// connection dots invisible. Clicks are silently drained below.
 	t.mStatus = systray.AddMenuItem("State: IDLE", "")
-	t.mNT = systray.AddMenuItem("⚪ NT", "")
-	t.mOBS = systray.AddMenuItem("⚪ OBS", "")
-	t.mBrain = systray.AddMenuItem("⚪ RavenBrain", "")
+	t.mNT = systray.AddMenuItem("NT: --", "")
+	t.mOBS = systray.AddMenuItem("OBS: --", "")
+	t.mBrain = systray.AddMenuItem("RavenBrain: --", "")
 
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Quit RavenLink")
@@ -160,13 +160,13 @@ func (t *Tray) UpdateStatus(st *status.Status) {
 		t.mStatus.SetTitle("State: " + matchState)
 	}
 	if t.mNT != nil {
-		t.mNT.SetTitle(connDot(ntConnected) + " NT")
+		t.mNT.SetTitle(connLabel("NT", ntConnected))
 	}
 	if t.mOBS != nil {
-		t.mOBS.SetTitle(connDot(obsConnected) + " OBS")
+		t.mOBS.SetTitle(connLabel("OBS", obsConnected))
 	}
 	if t.mBrain != nil {
-		t.mBrain.SetTitle(brainDot(brainConfigured, filesPending) + " RavenBrain")
+		t.mBrain.SetTitle(brainLabel(brainConfigured, filesPending))
 	}
 }
 
@@ -175,30 +175,29 @@ func (t *Tray) Stop() {
 	systray.Quit()
 }
 
-// connDot returns a green circle for a live connection and a
-// neutral white circle otherwise. Disconnected is a common/expected
-// idle state (robot off, OBS not running yet), so we deliberately
-// don't flag it as red — we just don't light it up.
-func connDot(connected bool) string {
+// connLabel returns a status string for a connection row.
+// Uses plain text instead of emoji because Win32 popup menus
+// don't render colored emoji glyphs.
+func connLabel(name string, connected bool) string {
 	if connected {
-		return "🟢"
+		return name + ": Connected"
 	}
-	return "⚪"
+	return name + ": --"
 }
 
-// brainDot is like connDot but adds a yellow "work pending" state:
+// brainLabel is like connLabel but adds a "pending" state:
 //
-//	not configured       → ⚪
-//	configured, backlog  → 🟡  (files in pending/ waiting to upload)
-//	configured, caught up → 🟢
-func brainDot(configured bool, filesPending int) string {
+//	not configured         → "RavenBrain: --"
+//	configured, backlog    → "RavenBrain: 3 pending"
+//	configured, caught up  → "RavenBrain: Connected"
+func brainLabel(configured bool, filesPending int) string {
 	if !configured {
-		return "⚪"
+		return "RavenBrain: --"
 	}
 	if filesPending > 0 {
-		return "🟡"
+		return fmt.Sprintf("RavenBrain: %d pending", filesPending)
 	}
-	return "🟢"
+	return "RavenBrain: Connected"
 }
 
 // openBrowser opens the given URL in the default browser.

@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -898,6 +899,13 @@ func create32BitHBitmap(hDC uintptr, cx, cy int32) (uintptr, error) {
 }
 
 func registerSystray() {
+	// The window and message pump must live on the same OS thread for
+	// the lifetime of the tray. Without this, Go's scheduler can move
+	// the goroutine to a different thread between GetMessage calls,
+	// causing the message pump to stop receiving window messages
+	// (GetMessage dispatches to the calling thread's queue).
+	runtime.LockOSThread()
+
 	if err := wt.initInstance(); err != nil {
 		log.Printf("systray error: unable to init instance: %s\n", err)
 		return
@@ -931,6 +939,7 @@ func nativeEnd() {
 
 func nativeStart() {
 	go func() {
+		runtime.LockOSThread()
 		for doNativeTick() {
 		}
 	}()
