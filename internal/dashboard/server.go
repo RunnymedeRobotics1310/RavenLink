@@ -3,6 +3,7 @@
 package dashboard
 
 import (
+	"bufio"
 	"context"
 	"embed"
 	"encoding/json"
@@ -11,7 +12,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +24,7 @@ import (
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/collect"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/config"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/status"
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/wpilog"
 )
 
 //go:embed static/*
@@ -67,18 +71,32 @@ type Server struct {
 	shutdownHook func() // optional callback when /api/shutdown is hit
 	restartHook  func() // optional callback when /api/restart is hit
 	collect      *collect.State // optional: wired by SetCollectState
+	dataDir      string         // captured at construction; immutable
+	activeIDFn   func() string  // returns active session ID; nil = none
 }
 
 // New creates a new dashboard server.
 // cfgPath is the path to the YAML config file for save/reload.
+// dataDir is captured at construction time so config edits don't change
+// the directory the running process is actually writing to.
 // reloadHook is called (if non-nil) after a config reload via the API.
-func New(cfg *config.Config, cfgPath string, st *status.Status, reloadHook func()) *Server {
+func New(cfg *config.Config, cfgPath, dataDir string, st *status.Status, reloadHook func()) *Server {
 	return &Server{
 		status:     st,
 		cfg:        cfg,
 		cfgPath:    cfgPath,
+		dataDir:    dataDir,
 		reloadHook: reloadHook,
 	}
+}
+
+// SetActiveSessionFn registers a function that returns the session ID
+// currently being written by the logger. Used by the sessions API to
+// exclude the active file from export.
+func (s *Server) SetActiveSessionFn(fn func() string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activeIDFn = fn
 }
 
 // SetLifecycleHooks wires callbacks for the Shutdown and Restart endpoints.
@@ -130,6 +148,8 @@ func (s *Server) Start(ctx context.Context, port int) {
 	mux.HandleFunc("POST /api/restart", s.requireSameOrigin(s.handleRestart))
 	mux.HandleFunc("POST /api/collect/pause", s.requireSameOrigin(s.handleCollectPause))
 	mux.HandleFunc("POST /api/collect/resume", s.requireSameOrigin(s.handleCollectResume))
+	mux.HandleFunc("GET /api/sessions", s.handleSessions)
+	mux.HandleFunc("GET /api/sessions/{id}/wpilog", s.handleSessionWPILog)
 
 	// Bind only to loopback — this dashboard is for the local user,
 	// not a service to expose on the LAN.
@@ -527,6 +547,201 @@ func (s *Server) handleCollectResume(w http.ResponseWriter, _ *http.Request) {
 	slog.Info("collection resumed via dashboard")
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"resumed"}`))
+}
+
+// ---------- Session Handlers ----------
+
+// sessionInfo is the JSON shape returned by GET /api/sessions.
+type sessionInfo struct {
+	ID       string `json:"id"`
+	Filename string `json:"filename"`
+	Date     string `json:"date"`
+	Entries  int    `json:"entries"`
+	SizeBytes int64 `json:"size_bytes"`
+	Status   string `json:"status"` // "pending", "uploaded", "recording"
+	Active   bool   `json:"active"`
+}
+
+// handleSessions returns metadata for all session files in both
+// pending/ and uploaded/ directories.
+func (s *Server) handleSessions(w http.ResponseWriter, _ *http.Request) {
+	s.mu.RLock()
+	activeIDFn := s.activeIDFn
+	dataDir := s.dataDir
+	team := s.cfg.Bridge.Team
+	s.mu.RUnlock()
+
+	activeID := ""
+	if activeIDFn != nil {
+		activeID = activeIDFn()
+	}
+
+	sessions := []sessionInfo{}
+	for _, sub := range []struct {
+		dir    string
+		status string
+	}{
+		{filepath.Join(dataDir, "pending"), "pending"},
+		{filepath.Join(dataDir, "uploaded"), "uploaded"},
+	} {
+		entries, err := os.ReadDir(sub.dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+				continue
+			}
+			sid := wpilog.ExtractSessionID(e.Name())
+			if sid == "" {
+				continue
+			}
+
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+
+			active := sid == activeID && activeID != ""
+			st := sub.status
+			if active {
+				st = "recording"
+			}
+
+			entryCount := readEntryCount(filepath.Join(sub.dir, e.Name()))
+
+			sessions = append(sessions, sessionInfo{
+				ID:        sid,
+				Filename:  e.Name(),
+				Date:      wpilog.ExtractDate(e.Name()),
+				Entries:   entryCount,
+				SizeBytes: info.Size(),
+				Status:    st,
+				Active:    active,
+			})
+		}
+	}
+
+	// Sort newest-first by filename (which starts with a UTC timestamp).
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].Filename > sessions[j].Filename
+	})
+
+	_ = team // available for future use
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(sessions)
+}
+
+// handleSessionWPILog converts a session JSONL file to WPILog and
+// serves it as a binary download.
+func (s *Server) handleSessionWPILog(w http.ResponseWriter, r *http.Request) {
+	sid := r.PathValue("id")
+	if sid == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing session id")
+		return
+	}
+
+	s.mu.RLock()
+	activeIDFn := s.activeIDFn
+	dataDir := s.dataDir
+	team := s.cfg.Bridge.Team
+	s.mu.RUnlock()
+
+	// Refuse to export the active session.
+	if activeIDFn != nil && activeIDFn() == sid {
+		writeJSONError(w, http.StatusConflict, "session is currently being recorded")
+		return
+	}
+
+	path, err := findSessionFile(dataDir, sid)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	jsonlData, err := os.ReadFile(path)
+	if err != nil {
+		slog.Error("failed to read session file", "path", path, "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to read session file")
+		return
+	}
+
+	wpilogData, err := wpilog.Convert(jsonlData, team, sid)
+	if err != nil {
+		slog.Error("failed to convert to WPILog", "session", sid, "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "WPILog conversion failed: "+err.Error())
+		return
+	}
+
+	// Derive download filename from the JSONL filename.
+	base := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	dlName := base + ".wpilog"
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, dlName))
+	w.Header().Set("Content-Length", strconv.Itoa(len(wpilogData)))
+	_, _ = w.Write(wpilogData)
+}
+
+// findSessionFile searches pending/ and uploaded/ for a JSONL file
+// whose name contains the given session ID.
+func findSessionFile(dataDir, sessionID string) (string, error) {
+	for _, sub := range []string{"pending", "uploaded"} {
+		dir := filepath.Join(dataDir, sub)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+				continue
+			}
+			if wpilog.ExtractSessionID(e.Name()) == sessionID {
+				return filepath.Join(dir, e.Name()), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("session %q not found", sessionID)
+}
+
+// readEntryCount reads the last line of a JSONL file and extracts
+// the entries_written field from the session_end record. Returns -1
+// if the file can't be read or has no session_end.
+func readEntryCount(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return -1
+	}
+	defer f.Close()
+
+	// Read last non-empty line by scanning the whole file. For files
+	// up to a few MB this is fast enough; the OS page cache will have
+	// the data hot after the first request.
+	var lastLine string
+	scanner := bufio.NewScanner(f)
+	// Increase buffer for long lines (some JSONL entries can be large).
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			lastLine = line
+		}
+	}
+
+	if lastLine == "" {
+		return -1
+	}
+	var entry struct {
+		Type           string `json:"type"`
+		EntriesWritten int    `json:"entries_written"`
+	}
+	if err := json.Unmarshal([]byte(lastLine), &entry); err != nil {
+		return -1
+	}
+	if entry.Type != "session_end" {
+		return -1
+	}
+	return entry.EntriesWritten
 }
 
 // ---------- Validation ----------

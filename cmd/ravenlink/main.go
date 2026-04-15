@@ -349,11 +349,14 @@ func main() {
 	// Dashboard
 	var dash *dashboard.Server
 	if cfg.Dashboard.Enabled {
-		dash = dashboard.New(cfg, cfgPath, st, func() {
+		dash = dashboard.New(cfg, cfgPath, cfg.Telemetry.DataDir, st, func() {
 			slog.Info("Config reloaded from dashboard")
 			autostart.Sync(cfg.Bridge.LaunchOnLogin)
 		})
 		dash.SetCollectState(collectState)
+		if ntLog != nil {
+			dash.SetActiveSessionFn(func() string { return ntLog.Stats().ActiveSessionID })
+		}
 		// Wire lifecycle hooks: dashboard Save/Restart/Shutdown buttons.
 		// Save triggers a restart so new config is applied fresh without
 		// hot-reload complexity.
