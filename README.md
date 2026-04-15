@@ -9,7 +9,8 @@ Runs on the Driver Station laptop and:
 - **Captures all NetworkTables data** — subscribes to configurable path prefixes, logs every value change to JSONL files with timestamps
 - **Auto starts/stops OBS recording** — based on FMS match state (or manual/practice mode)
 - **Store-and-forward upload** — data saved locally first, uploaded to RavenBrain when internet is available (with idempotent retry and JWT auth)
-- **Web dashboard** at `http://localhost:8080` — live status, log viewer, config editor, restart/shutdown buttons
+- **Web dashboard** at `http://localhost:8080` — live status, log viewer, session browser, config editor, restart/shutdown buttons
+- **WPILog export** — convert any session to `.wpilog` and open directly in AdvantageScope from the dashboard
 - **Menu bar / system tray icon** — click for connection status, "Open Dashboard", "Quit". Menu rows use colored dots (🟢 live, 🟡 backlog, ⚪ idle) for NT, OBS, and RavenBrain
 - **Auto-opens the dashboard** in your browser on launch (unless started in `--minimized` mode by autostart)
 - **First-run wizard** — ships with no team configured; on first launch the dashboard opens a config form, and saving restarts RavenLink with the new values automatically
@@ -64,7 +65,8 @@ bridge:
   stop_delay: 10
   poll_interval: 0.05
   log_level: INFO
-  record_trigger: fms      # fms | auto | any
+  record_trigger: fms      # fms | auto | any — when to run OBS
+  collect_trigger: fms     # fms | auto | any — when to log/upload NT data
   auto_teleop_gap: 5
   nt_disconnect_grace: 15
   launch_on_login: true
@@ -90,15 +92,17 @@ dashboard:
 
 Any setting can also be overridden by CLI flag — run `ravenlink --help` for the full list.
 
-### Record Trigger Modes
+### Trigger Modes
+
+Both `record_trigger` (OBS recording) and `collect_trigger` (NT data logging + upload) support the same three modes. They can be set independently — e.g., collect only during FMS matches while leaving OBS on "any".
 
 | Mode | Trigger | Use case |
 |------|---------|----------|
 | `fms` | FMS attached + enabled | Competition matches (default) |
 | `auto` | Auto mode + enabled | DS Practice button, manual auto enables |
-| `any` | Any robot enable | Any enable triggers recording |
+| `any` | Any robot enable | Any enable triggers recording/collection |
 
-All three modes use the same stop logic: robot disable → auto-teleop gap tolerance → `stop_delay` → OBS stop.
+All three modes use the same stop logic: robot disable → auto-teleop gap tolerance → `stop_delay` → stop.
 
 ## Building
 
@@ -218,9 +222,12 @@ On 401: invalidate token, retry once. On network failure: exponential backoff (5
 
 `http://localhost:8080` when the bridge is running:
 
-- **Status** — live connection status, match state, telemetry stats, upload progress
-- **Logs** — recent log output (auto-scrolling)
+- **Status** — live connection status, match state, telemetry stats, collection state, upload progress
+- **Logs** — recent slog output (auto-scrolling)
+- **Sessions** — browse all recorded session files (pending + uploaded), see match IDs for FMS matches, export to `.wpilog`, or open directly in AdvantageScope
 - **Config** — edit all settings, save to `config.yaml`, hot-reload for supported fields
+
+The Sessions tab auto-refreshes via SSE when file counts change. WPILog files saved via "Open" are stored in `data/wpilog/` for quick re-opening.
 
 ## Shutting Down Gracefully
 
@@ -287,9 +294,10 @@ cmd/iconbuilder/              # Generates .iconset → .icns for the .app bundle
 internal/
 ├── assets/                   # Embedded team logo PNG
 ├── autostart/                # Launch-on-login (build-tagged per OS)
+├── collect/                  # Runtime pause flag for NT data collection
 ├── config/                   # YAML config, CLI flags, save-and-restart
-├── dashboard/                # Embedded HTTP dashboard + static UI
-├── lifecycle/                # Self-restart (exec/spawn), OpenBrowser
+├── dashboard/                # Embedded HTTP dashboard + static UI + session list + WPILog export
+├── lifecycle/                # Self-restart (exec/spawn), OpenBrowser, OpenFile
 ├── ntclient/                 # NT4 WebSocket+MessagePack client
 ├── ntlogger/                 # JSONL writing, session lifecycle, match markers
 ├── obsclient/                # OBS WebSocket (via goobs library)
@@ -297,7 +305,9 @@ internal/
 ├── statemachine/             # Pure-logic state machine (53 tests)
 ├── status/                   # Thread-safe shared state
 ├── tray/                     # Menu bar / system tray icon (fyne.io/systray)
-└── uploader/                 # Store-and-forward upload + JWT auth
+├── typeconv/                 # NT value type coercion helpers
+├── uploader/                 # Store-and-forward upload + JWT auth
+└── wpilog/                   # WPILog v1.0 encoder (JSONL → .wpilog for AdvantageScope, 22 tests)
 third_party/
 └── systray/                  # Vendored fyne.io/systray (one-line patch)
 ```
