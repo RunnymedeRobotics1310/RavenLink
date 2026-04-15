@@ -52,6 +52,18 @@
   .banner.warn { background: #422006; border: 1px solid #854d0e; color: #fbbf24; }
   .banner.success { background: #052e16; border: 1px solid #166534; color: #4ade80; }
   .hidden { display: none; }
+  .session-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .session-table th { text-align: left; color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; padding: 8px 12px; border-bottom: 1px solid #334155; }
+  .session-table td { padding: 8px 12px; border-bottom: 1px solid #1e293b; }
+  .session-table tr:hover td { background: #1e293b; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+  .badge-pending { background: #422006; color: #fbbf24; }
+  .badge-uploaded { background: #052e16; color: #4ade80; }
+  .badge-recording { background: #1e3a8a; color: #93c5fd; }
+  .btn-sm { padding: 4px 10px; border-radius: 4px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; font-size: 12px; cursor: pointer; }
+  .btn-sm:hover { background: #334155; }
+  .btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
+  .empty-state { text-align: center; color: #64748b; padding: 48px 24px; }
 </style>
 </head>
 <body>
@@ -74,6 +86,7 @@
   <div class="tabs">
     <div class="tab active" data-tab="status">Status</div>
     <div class="tab" data-tab="logs">Logs</div>
+    <div class="tab" data-tab="sessions">Sessions</div>
     <div class="tab" data-tab="config">Config</div>
   </div>
 
@@ -114,6 +127,10 @@
 
   <div class="tab-content" id="tab-logs">
     <div class="log-box" id="log-output"></div>
+  </div>
+
+  <div class="tab-content" id="tab-sessions">
+    <div id="sessions-list"></div>
   </div>
 
   <div class="tab-content" id="tab-config">
@@ -159,6 +176,7 @@ document.querySelectorAll('.tab').forEach(t=>{
     t.classList.add('active');
     document.getElementById('tab-'+t.dataset.tab).classList.add('active');
     if(t.dataset.tab==='config') loadConfig();
+    if(t.dataset.tab==='sessions') loadSessions();
   });
 });
 
@@ -221,6 +239,12 @@ function updateStatus(d){
   document.getElementById('log-output').textContent=(d.recent_logs||[]).join('\n');
   const lb=document.getElementById('log-output');
   lb.scrollTop=lb.scrollHeight;
+  // Auto-refresh sessions tab when file counts change.
+  if(_prevPending>=0 && (d.files_pending!==_prevPending||d.files_uploaded!==_prevUploaded)){
+    const sessTab=document.getElementById('tab-sessions');
+    if(sessTab&&sessTab.classList.contains('active')) loadSessions();
+  }
+  _prevPending=d.files_pending; _prevUploaded=d.files_uploaded;
 }
 
 function loadConfig(){
@@ -365,6 +389,49 @@ if(btnShutdown){
     fetch('/api/shutdown',{method:'POST'}).then(goodbye).catch(goodbye);
   });
 }
+
+// ---- Sessions tab ----
+
+function formatBytes(b){
+  if(b<1024)return b+' B';
+  if(b<1024*1024)return (b/1024).toFixed(1)+' KB';
+  return (b/(1024*1024)).toFixed(1)+' MB';
+}
+function formatDate(iso){
+  if(!iso)return '—';
+  try{return new Date(iso).toLocaleString();}catch(e){return iso;}
+}
+function badgeHTML(status){
+  return '<span class="badge badge-'+status+'">'+status+'</span>';
+}
+function loadSessions(){
+  const el=document.getElementById('sessions-list');
+  fetch('/api/sessions').then(r=>r.json()).then(sessions=>{
+    if(!sessions||sessions.length===0){
+      el.innerHTML='<div class="empty-state">No session files yet. Sessions appear here once data collection starts.</div>';
+      return;
+    }
+    let html='<table class="session-table"><thead><tr><th>Date</th><th>Session</th><th>Entries</th><th>Size</th><th>Status</th><th></th></tr></thead><tbody>';
+    for(const s of sessions){
+      const entries=s.entries>=0?s.entries.toLocaleString():'—';
+      const canExport=!s.active;
+      const btn=canExport
+        ?'<button class="btn-sm" onclick="exportWpilog(\''+s.id+'\')">Export WPILog</button>'
+        :'<button class="btn-sm" disabled title="Cannot export while recording">Recording...</button>';
+      html+='<tr><td>'+formatDate(s.date)+'</td><td style="font-family:monospace;font-size:12px">'+s.id+'</td><td>'+entries+'</td><td>'+formatBytes(s.size_bytes)+'</td><td>'+badgeHTML(s.status)+'</td><td>'+btn+'</td></tr>';
+    }
+    html+='</tbody></table>';
+    el.innerHTML=html;
+  }).catch(()=>{
+    el.innerHTML='<div class="empty-state">Failed to load sessions.</div>';
+  });
+}
+function exportWpilog(id){
+  window.location='/api/sessions/'+encodeURIComponent(id)+'/wpilog';
+}
+
+// Track file counts to auto-refresh sessions tab when they change.
+let _prevPending=-1,_prevUploaded=-1;
 
 // Live status updates via Server-Sent Events. The server pushes a
 // JSON snapshot once per second over a single long-lived connection,
