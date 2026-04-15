@@ -10,8 +10,9 @@ RavenLink — FRC robot data bridge for Team 1310. Written in Go. Produces a sin
 2. Logs all value changes to JSONL files with timestamps and match markers
 3. Auto-starts/stops OBS Studio recording based on FMS match state
 4. Store-and-forwards telemetry to RavenBrain via JWT-authenticated REST API
-5. Serves a web dashboard for status monitoring and config editing
-6. Runs as a system tray icon with launch-on-login
+5. Serves a web dashboard for status monitoring, config editing, session browsing, and WPILog export
+6. Exports session data to `.wpilog` format for AdvantageScope
+7. Runs as a system tray icon with launch-on-login
 
 The RavenBrain server (Micronaut/Java/MySQL) lives at `~/src/1310/RavenBrain`.
 
@@ -54,8 +55,9 @@ internal/
 ├── assets/                   # Embedded team 1310 logo PNG
 ├── autostart/                # Launch-on-login (build-tagged per OS)
 ├── config/                   # YAML config + CLI flags
-├── dashboard/                # Embedded HTTP server + static HTML + shutdown/restart hooks
-├── lifecycle/                # Self-restart (exec/spawn) + OpenBrowser
+├── collect/                  # Runtime pause flag for NT data collection
+├── dashboard/                # Embedded HTTP server + static HTML + session list + WPILog export
+├── lifecycle/                # Self-restart (exec/spawn) + OpenBrowser + OpenFile
 ├── ntclient/                 # NT4 WebSocket+MessagePack client
 ├── ntlogger/                 # JSONL writing, session lifecycle, match markers
 ├── obsclient/                # OBS WebSocket v5 (wraps goobs)
@@ -63,7 +65,9 @@ internal/
 ├── statemachine/             # Pure-logic state machine (53 tests)
 ├── status/                   # Thread-safe shared BridgeStatus
 ├── tray/                     # Menu bar / system tray icon (fyne.io/systray)
-└── uploader/                 # Store-and-forward + JWT auth
+├── typeconv/                 # NT value type coercion helpers
+├── uploader/                 # Store-and-forward + JWT auth
+└── wpilog/                   # WPILog v1.0 binary encoder (JSONL → .wpilog for AdvantageScope)
 third_party/
 └── systray/                  # Vendored fyne.io/systray (one-line patch; see go.mod replace)
 ```
@@ -92,7 +96,13 @@ third_party/
 
 11. **Save-and-restart config flow** — the dashboard's Save button writes `config.yaml` and triggers `lifecycle.RestartSelf()`. On Unix this is `syscall.Exec` (in-place replacement); on Windows it spawns a new process and `os.Exit(0)`s. This avoids the complexity of hot-reloading arbitrary config fields at runtime.
 
-12. **`--minimized` flag** — `autostart_darwin.go` (LaunchAgent plist) and `autostart_windows.go` (Run key) both register RavenLink with a `--minimized` argument. This flag is handled by `config.ParseFlags` (otherwise `flag.ExitOnError` would kill the auto-launched process!) and causes `main.go` to skip the browser auto-open. First-run (team==0) still opens the browser even when `--minimized`, because the user needs to complete setup.
+12. **WPILog export is a standalone package** — `internal/wpilog/` has no dependencies on the rest of RavenLink. It takes `[]byte` JSONL in and returns `[]byte` WPILog out. Two-pass conversion: first pass collects unique (key, type) pairs and assigns entry IDs; second pass writes the binary file. Match markers are synthesized as `/RavenLink/MatchEvent` string entries so they appear on AdvantageScope's timeline. NT4 `int`→`int64` and `float`→`double` type promotion is handled in the type mapper.
+
+13. **Dashboard sessions use captured dataDir** — the `Server` struct captures `dataDir` at construction time, not from the live `*config.Config`. This prevents the session listing from looking in the wrong directory after a config edit (before the restart that applies it). The active session is excluded from export by checking `ntLog.Stats().ActiveSessionID`.
+
+14. **"Open in AdvantageScope" saves then opens** — `POST /api/sessions/{id}/open` converts the JSONL to WPILog, saves it to `data/wpilog/`, then calls `lifecycle.OpenFile()` which delegates to the OS default handler for `.wpilog` files. The saved file persists so re-opening is instant.
+
+15. **`--minimized` flag** — `autostart_darwin.go` (LaunchAgent plist) and `autostart_windows.go` (Run key) both register RavenLink with a `--minimized` argument. This flag is handled by `config.ParseFlags` (otherwise `flag.ExitOnError` would kill the auto-launched process!) and causes `main.go` to skip the browser auto-open. First-run (team==0) still opens the browser even when `--minimized`, because the user needs to complete setup.
 
 ### FMS bitmask layout
 
@@ -117,7 +127,8 @@ The state machine's `RecordTrigger` setting (`fms` / `auto` / `any`) determines 
 ## Testing
 
 - **State machine tests** — `internal/statemachine/machine_test.go` — FakeClock + `makeFMS()` helper. 53 tests covering all lifecycle scenarios, trigger modes, and bitmask parsing. No I/O, no external deps.
-- **Run with**: `go test ./internal/statemachine/ -v`
+- **WPILog encoder tests** — `internal/wpilog/encoder_test.go` — 22 tests covering file header, record bitfield encoding, all NT4 type round-trips (including JSON float64→int64 cast, base64 raw decode, float→double promotion, string[] count-prefix), timestamp fallback, match marker synthesis, empty sessions, and the WPILog spec's reference example.
+- **Run with**: `go test ./internal/statemachine/ -v` or `go test ./internal/wpilog/ -v`
 
 ## Dependencies
 
@@ -138,7 +149,7 @@ Everything else is stdlib: `net/http`, `encoding/json`, `log/slog`, `embed`, `co
 
 | Section | Hot-reloadable |
 |---------|----------------|
-| `bridge` | log_level, stop_delay, poll_interval, auto_teleop_gap, nt_disconnect_grace, record_trigger, launch_on_login |
+| `bridge` | log_level, stop_delay, poll_interval, auto_teleop_gap, nt_disconnect_grace, record_trigger, collect_trigger, launch_on_login |
 | `telemetry` | nt_paths, retention_days |
 | `ravenbrain` | batch_size, upload_interval |
 | `dashboard` | — (restart required) |
@@ -155,6 +166,7 @@ Immutable fields (team, obs_host, obs_port) require a restart — dashboard show
 - **First-run mode** — when `cfg.Bridge.Team == 0`, `main.go` skips NT/OBS/logger/uploader startup and only runs the dashboard + tray + browser. The main loop goroutine is also skipped in this mode. Don't unconditionally dereference subsystem pointers after `if !firstRun` — they're still nil.
 - **Template icon on macOS** — `settricon_darwin.go` passes a 22x22 black+alpha silhouette via `SetTemplateIcon`. AppKit tints template icons automatically for light/dark mode. Without the template path, the menu bar icon often fails to appear on recent macOS versions.
 - **Icon must be ICO on Windows** — `icon_windows.go` wraps the generated PNG in a minimal ICO container (Vista+ supports PNG-inside-ICO). `systray.SetIcon` silently fails with a raw PNG on Windows.
+- **Dashboard `dataDir` is captured, not live** — `dashboard.New()` takes `dataDir string` as a construction-time parameter. Don't read `s.cfg.Telemetry.DataDir` in session handlers — the config may have been edited (but not yet restarted) and would point to the wrong directory.
 - **macOS .m file needs `-x objective-c` CFLAG** — `nsapp_darwin.go` sets `#cgo darwin CFLAGS: -x objective-c -fobjc-arc`. Without `-x objective-c` the compiler treats `.m` as C and fails on `@interface`.
 
 ## Commit message conventions
