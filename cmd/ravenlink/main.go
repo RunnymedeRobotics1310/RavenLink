@@ -177,7 +177,10 @@ func main() {
 	if logFile != nil {
 		logWriter = io.MultiWriter(os.Stdout, logFile)
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: level})))
+	dashHandler := &dashLogHandler{
+		inner: slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: level}),
+	}
+	slog.SetDefault(slog.New(dashHandler))
 	if logErr != nil {
 		slog.Warn("could not open log file", "err", logErr)
 	}
@@ -204,6 +207,11 @@ func main() {
 
 	// Shared status
 	st := status.New()
+
+	// Wire slog → dashboard log buffer now that the status struct exists.
+	dashHandler.hook = func(msg string) {
+		st.Update(func(s *status.Status) { s.AddLog(msg) })
+	}
 
 	// Runtime pause flag for NT data collection + RavenBrain upload.
 	// Shared between main loop (drives session lifecycle), uploader
@@ -657,6 +665,45 @@ func runMainLoop(
 			)
 		}
 	}
+}
+
+// dashLogHandler wraps an slog.Handler and copies every log record into
+// a callback. This lets us tee slog output into the dashboard's
+// RecentLogs ring buffer without touching the logging hot path.
+type dashLogHandler struct {
+	inner slog.Handler
+	hook  func(string) // set after status is created
+}
+
+func (h *dashLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.inner.Enabled(ctx, level)
+}
+
+func (h *dashLogHandler) Handle(ctx context.Context, r slog.Record) error {
+	if h.hook != nil {
+		// Format: "LEVEL message key=val key=val ..."
+		var b strings.Builder
+		b.WriteString(r.Level.String())
+		b.WriteByte(' ')
+		b.WriteString(r.Message)
+		r.Attrs(func(a slog.Attr) bool {
+			b.WriteByte(' ')
+			b.WriteString(a.Key)
+			b.WriteByte('=')
+			b.WriteString(a.Value.String())
+			return true
+		})
+		h.hook(b.String())
+	}
+	return h.inner.Handle(ctx, r)
+}
+
+func (h *dashLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &dashLogHandler{inner: h.inner.WithAttrs(attrs), hook: h.hook}
+}
+
+func (h *dashLogHandler) WithGroup(name string) slog.Handler {
+	return &dashLogHandler{inner: h.inner.WithGroup(name), hook: h.hook}
 }
 
 func stateName(s statemachine.State) string {
