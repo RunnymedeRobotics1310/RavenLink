@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strings"
 )
 
 // MapNT4Type converts an NT4 type name to the corresponding WPILog
@@ -54,6 +55,12 @@ func EncodeValue(nt4Type string, v any) ([]byte, error) {
 	case "string[]":
 		return encodeStringArray(v)
 	default:
+		// struct:*, structarray:*, and other extended types arrive as
+		// raw binary. In JSONL they are base64-encoded (via ntlogger's
+		// coerceValue). Treat them like raw.
+		if strings.HasPrefix(nt4Type, "struct:") || strings.HasPrefix(nt4Type, "structarray:") {
+			return encodeRaw(v)
+		}
 		return nil, fmt.Errorf("unsupported NT4 type %q", nt4Type)
 	}
 }

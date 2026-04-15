@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,8 +40,9 @@ type TopicValue struct {
 
 // topicInfo stores metadata for an announced topic.
 type topicInfo struct {
-	name   string
-	typeID int
+	name     string
+	typeID   int
+	typeName string // original type string from announce (e.g. "struct:Pose2d")
 }
 
 // Client is an NT4 WebSocket client that streams topic values.
@@ -303,13 +305,18 @@ func (c *Client) handleTextFrame(data []byte, topics map[int]topicInfo) error {
 				continue
 			}
 			typeID := typeNameToID(msg.Params.Type)
+			// Normalize double slashes in topic names. Some robot
+			// code produces paths like /Prefix//Sub/key when the
+			// prefix already ends with / and getSubTable adds another.
+			name := normalizeTopicName(msg.Params.Name)
 			topics[msg.Params.ID] = topicInfo{
-				name:   msg.Params.Name,
-				typeID: typeID,
+				name:     name,
+				typeID:   typeID,
+				typeName: msg.Params.Type,
 			}
 			slog.Debug("ntclient: topic announced",
 				"id", msg.Params.ID,
-				"name", msg.Params.Name,
+				"name", name,
 				"type", msg.Params.Type,
 			)
 
@@ -347,10 +354,20 @@ func (c *Client) handleBinaryFrame(data []byte, topics map[int]topicInfo) error 
 			continue
 		}
 
+		// Always use the type string from the announce message — it
+		// preserves extended types like "struct:Pose2d" and
+		// "structarray:Pose2d" that the wire type ID (5 = raw)
+		// would lose. For standard types the announce string
+		// matches TypeName() anyway ("double", "boolean", etc.).
+		typeName := info.typeName
+		if typeName == "" {
+			typeName = TypeName(e.TypeID)
+		}
+
 		tv := TopicValue{
-			Name:            info.name,
-			Type:            TypeName(e.TypeID),
-			Value:           e.Value,
+			Name:             info.name,
+			Type:             typeName,
+			Value:            e.Value,
 			ServerTimeMicros: e.TimestampMicros,
 		}
 
@@ -366,6 +383,16 @@ func (c *Client) handleBinaryFrame(data []byte, topics map[int]topicInfo) error 
 		}
 	}
 	return nil
+}
+
+// normalizeTopicName collapses consecutive slashes in NT topic paths.
+// Some robot code produces paths like "/Prefix//Sub/key" when the NT
+// prefix ends with "/" and getSubTable prepends another.
+func normalizeTopicName(name string) string {
+	for strings.Contains(name, "//") {
+		name = strings.ReplaceAll(name, "//", "/")
+	}
+	return name
 }
 
 // typeNameToID maps a type name string (from announce) to a type ID constant.
