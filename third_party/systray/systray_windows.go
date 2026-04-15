@@ -753,6 +753,14 @@ func (t *winTray) showMenu() error {
 		uintptr(t.window),
 		0,
 	)
+
+	// MSDN requires posting WM_NULL after TrackPopupMenu returns so
+	// the message queue flushes correctly. Without this, subsequent
+	// clicks on the notification icon frequently fail to open the menu.
+	// https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-trackpopupmenu
+	const WM_NULL = 0x0000
+	pPostMessage.Call(uintptr(t.window), WM_NULL, 0, 0)
+
 	if res == 0 {
 		return err
 	}

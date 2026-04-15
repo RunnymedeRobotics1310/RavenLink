@@ -67,14 +67,13 @@ func (t *Tray) onReady() {
 	mOpen := systray.AddMenuItem("Open Dashboard", "Open the web dashboard in a browser")
 	systray.AddSeparator()
 
+	// Status rows are informational — not Disable()'d because Windows
+	// grays out the entire item including colored emoji, making the
+	// connection dots invisible. Clicks are silently drained below.
 	t.mStatus = systray.AddMenuItem("State: IDLE", "")
-	t.mStatus.Disable()
 	t.mNT = systray.AddMenuItem("⚪ NT", "")
-	t.mNT.Disable()
 	t.mOBS = systray.AddMenuItem("⚪ OBS", "")
-	t.mOBS.Disable()
 	t.mBrain = systray.AddMenuItem("⚪ RavenBrain", "")
-	t.mBrain.Disable()
 
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Quit RavenLink")
@@ -84,6 +83,14 @@ func (t *Tray) onReady() {
 			select {
 			case <-mOpen.ClickedCh:
 				openBrowser(t.dashboardURL)
+			case <-t.mStatus.ClickedCh:
+				// informational — no action
+			case <-t.mNT.ClickedCh:
+				// informational — no action
+			case <-t.mOBS.ClickedCh:
+				// informational — no action
+			case <-t.mBrain.ClickedCh:
+				// informational — no action
 			case <-mQuit.ClickedCh:
 				t.quitOnce.Do(func() {
 					if t.quitCh != nil {
