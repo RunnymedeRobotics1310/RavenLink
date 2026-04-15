@@ -48,17 +48,28 @@ func RestartSelf() error {
 // Non-blocking. Errors are logged but not returned — browser launch
 // is best-effort.
 func OpenBrowser(url string) {
+	openDefault(url)
+}
+
+// OpenFile opens a local file with the OS default handler for its
+// extension. For .wpilog this is typically AdvantageScope.
+func OpenFile(path string) {
+	openDefault(path)
+}
+
+func openDefault(target string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.Command("open", target)
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		// cmd /c start is more reliable than rundll32 for local files.
+		cmd = exec.Command("cmd", "/c", "start", "", target)
 	default:
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.Command("xdg-open", target)
 	}
 	if err := cmd.Start(); err != nil {
-		slog.Warn("could not open browser", "url", url, "err", err)
+		slog.Warn("could not open", "target", target, "err", err)
 		return
 	}
 	// Reap the child so it doesn't become a zombie.

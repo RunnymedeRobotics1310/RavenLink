@@ -411,14 +411,16 @@ function loadSessions(){
       el.innerHTML='<div class="empty-state">No session files yet. Sessions appear here once data collection starts.</div>';
       return;
     }
-    let html='<table class="session-table"><thead><tr><th>Date</th><th>Session</th><th>Entries</th><th>Size</th><th>Status</th><th></th></tr></thead><tbody>';
+    let html='<table class="session-table"><thead><tr><th>Date</th><th>Session</th><th>Match</th><th>Entries</th><th>Size</th><th>Status</th><th></th></tr></thead><tbody>';
     for(const s of sessions){
       const entries=s.entries>=0?s.entries.toLocaleString():'—';
       const canExport=!s.active;
-      const btn=canExport
-        ?'<button class="btn-sm" onclick="exportWpilog(\''+s.id+'\')">Export WPILog</button>'
+      const btns=canExport
+        ?'<button class="btn-sm" onclick="openInAS(\''+s.id+'\')" title="Save WPILog and open in AdvantageScope">Open</button> '
+        +'<button class="btn-sm" onclick="exportWpilog(\''+s.id+'\')" title="Download .wpilog file">Export</button>'
         :'<button class="btn-sm" disabled title="Cannot export while recording">Recording...</button>';
-      html+='<tr><td>'+formatDate(s.date)+'</td><td style="font-family:monospace;font-size:12px">'+s.id+'</td><td>'+entries+'</td><td>'+formatBytes(s.size_bytes)+'</td><td>'+badgeHTML(s.status)+'</td><td>'+btn+'</td></tr>';
+      const match=s.match||'';
+      html+='<tr><td>'+formatDate(s.date)+'</td><td style="font-family:monospace;font-size:12px">'+s.id+'</td><td>'+(match||'—')+'</td><td>'+entries+'</td><td>'+formatBytes(s.size_bytes)+'</td><td>'+badgeHTML(s.status)+'</td><td style="white-space:nowrap">'+btns+'</td></tr>';
     }
     html+='</tbody></table>';
     el.innerHTML=html;
@@ -428,6 +430,11 @@ function loadSessions(){
 }
 function exportWpilog(id){
   window.location='/api/sessions/'+encodeURIComponent(id)+'/wpilog';
+}
+function openInAS(id){
+  fetch('/api/sessions/'+encodeURIComponent(id)+'/open',{method:'POST'})
+    .then(r=>{if(!r.ok) return r.json().then(j=>{throw new Error(j.error||r.statusText)});})
+    .catch(err=>alert('Failed to open: '+err.message));
 }
 
 // Track file counts to auto-refresh sessions tab when they change.

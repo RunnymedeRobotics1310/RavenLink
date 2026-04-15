@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/assets"
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/lifecycle"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/collect"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/config"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/status"
@@ -150,6 +151,7 @@ func (s *Server) Start(ctx context.Context, port int) {
 	mux.HandleFunc("POST /api/collect/resume", s.requireSameOrigin(s.handleCollectResume))
 	mux.HandleFunc("GET /api/sessions", s.handleSessions)
 	mux.HandleFunc("GET /api/sessions/{id}/wpilog", s.handleSessionWPILog)
+	mux.HandleFunc("POST /api/sessions/{id}/open", s.requireSameOrigin(s.handleSessionOpen))
 
 	// Bind only to loopback — this dashboard is for the local user,
 	// not a service to expose on the LAN.
@@ -553,13 +555,14 @@ func (s *Server) handleCollectResume(w http.ResponseWriter, _ *http.Request) {
 
 // sessionInfo is the JSON shape returned by GET /api/sessions.
 type sessionInfo struct {
-	ID       string `json:"id"`
-	Filename string `json:"filename"`
-	Date     string `json:"date"`
-	Entries  int    `json:"entries"`
-	SizeBytes int64 `json:"size_bytes"`
-	Status   string `json:"status"` // "pending", "uploaded", "recording"
-	Active   bool   `json:"active"`
+	ID        string `json:"id"`
+	Filename  string `json:"filename"`
+	Date      string `json:"date"`
+	Entries   int    `json:"entries"`
+	SizeBytes int64  `json:"size_bytes"`
+	Status    string `json:"status"` // "pending", "uploaded", "recording"
+	Active    bool   `json:"active"`
+	Match     string `json:"match,omitempty"` // e.g. "Q42", "E3" — empty for practice
 }
 
 // handleSessions returns metadata for all session files in both
@@ -608,7 +611,9 @@ func (s *Server) handleSessions(w http.ResponseWriter, _ *http.Request) {
 				st = "recording"
 			}
 
-			entryCount := readEntryCount(filepath.Join(sub.dir, e.Name()))
+			fpath := filepath.Join(sub.dir, e.Name())
+			entryCount := readEntryCount(fpath)
+			match := readMatchID(fpath)
 
 			sessions = append(sessions, sessionInfo{
 				ID:        sid,
@@ -618,6 +623,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, _ *http.Request) {
 				SizeBytes: info.Size(),
 				Status:    st,
 				Active:    active,
+				Match:     match,
 			})
 		}
 	}
@@ -683,6 +689,69 @@ func (s *Server) handleSessionWPILog(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(wpilogData)
 }
 
+// handleSessionOpen converts a session to WPILog, saves it to
+// data/wpilog/, and opens it with the OS default handler (typically
+// AdvantageScope for .wpilog files).
+func (s *Server) handleSessionOpen(w http.ResponseWriter, r *http.Request) {
+	sid := r.PathValue("id")
+	if sid == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing session id")
+		return
+	}
+
+	s.mu.RLock()
+	activeIDFn := s.activeIDFn
+	dataDir := s.dataDir
+	team := s.cfg.Bridge.Team
+	s.mu.RUnlock()
+
+	if activeIDFn != nil && activeIDFn() == sid {
+		writeJSONError(w, http.StatusConflict, "session is currently being recorded")
+		return
+	}
+
+	path, err := findSessionFile(dataDir, sid)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	jsonlData, err := os.ReadFile(path)
+	if err != nil {
+		slog.Error("failed to read session file", "path", path, "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to read session file")
+		return
+	}
+
+	wpilogData, err := wpilog.Convert(jsonlData, team, sid)
+	if err != nil {
+		slog.Error("failed to convert to WPILog", "session", sid, "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "WPILog conversion failed: "+err.Error())
+		return
+	}
+
+	// Save to data/wpilog/ so the file persists after the browser tab closes.
+	wpilogDir := filepath.Join(dataDir, "wpilog")
+	if err := os.MkdirAll(wpilogDir, 0o755); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to create wpilog directory")
+		return
+	}
+	base := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	outPath := filepath.Join(wpilogDir, base+".wpilog")
+	if err := os.WriteFile(outPath, wpilogData, 0o644); err != nil {
+		slog.Error("failed to write WPILog file", "path", outPath, "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to write WPILog file")
+		return
+	}
+
+	// Open with the OS default handler for .wpilog (AdvantageScope).
+	lifecycle.OpenFile(outPath)
+
+	slog.Info("opened session in AdvantageScope", "session", sid, "path", outPath)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"opened"}`))
+}
+
 // findSessionFile searches pending/ and uploaded/ for a JSONL file
 // whose name contains the given session ID.
 func findSessionFile(dataDir, sessionID string) (string, error) {
@@ -742,6 +811,71 @@ func readEntryCount(path string) int {
 		return -1
 	}
 	return entry.EntriesWritten
+}
+
+// matchTypePrefix maps the FMS MatchType integer to a display prefix.
+// 0=None, 1=Practice, 2=Qualification, 3=Elimination.
+var matchTypePrefix = map[int]string{
+	1: "P",
+	2: "Q",
+	3: "E",
+}
+
+// readMatchID scans a JSONL file for /FMSInfo/MatchType and
+// /FMSInfo/MatchNumber data entries and returns a display string like
+// "Q42" or "E3". Returns "" if no FMS match info is found (practice
+// sessions without FMS have MatchType=0 and MatchNumber=0).
+func readMatchID(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	var matchType int
+	var matchNumber int
+	found := 0
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() && found < 2 {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		// Quick filter before full JSON parse.
+		if !strings.Contains(line, "FMSInfo/Match") {
+			continue
+		}
+		var entry struct {
+			Key   string `json:"key"`
+			Value any    `json:"value"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		switch entry.Key {
+		case "/FMSInfo/MatchType":
+			if n, ok := entry.Value.(float64); ok {
+				matchType = int(n)
+				found++
+			}
+		case "/FMSInfo/MatchNumber":
+			if n, ok := entry.Value.(float64); ok {
+				matchNumber = int(n)
+				found++
+			}
+		}
+	}
+
+	if matchNumber <= 0 {
+		return ""
+	}
+	prefix, ok := matchTypePrefix[matchType]
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%s%d", prefix, matchNumber)
 }
 
 // ---------- Validation ----------
