@@ -118,7 +118,7 @@ func (c *Client) ConnectAddress(address string, port int, prefixes []string) {
 		return
 	}
 	c.url = fmt.Sprintf("ws://%s:%d/nt/%s", address, port, c.clientName)
-	c.prefixes = withFMSInfo(prefixes)
+	c.prefixes = withRequiredPrefixes(prefixes)
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	c.mu.Unlock()
 
@@ -133,19 +133,33 @@ func (c *Client) ConnectAddress(address string, port int, prefixes []string) {
 // /FMSInfo/ is always included regardless of the provided prefixes.
 func (c *Client) Subscribe(prefixes []string) {
 	c.mu.Lock()
-	c.prefixes = withFMSInfo(prefixes)
+	c.prefixes = withRequiredPrefixes(prefixes)
 	c.mu.Unlock()
 }
 
-// withFMSInfo ensures /FMSInfo/ is always in the subscription list.
-func withFMSInfo(prefixes []string) []string {
+// requiredPrefixes are always subscribed regardless of user config.
+// /FMSInfo/ is needed for match state detection. /.schema/ is needed
+// for struct types (Pose2d, etc.) to render in AdvantageScope.
+var requiredPrefixes = []string{"/FMSInfo/", "/.schema/"}
+
+// withRequiredPrefixes ensures required prefixes are always in the
+// subscription list.
+func withRequiredPrefixes(prefixes []string) []string {
+	have := make(map[string]bool, len(prefixes))
 	for _, p := range prefixes {
-		if p == "/FMSInfo/" {
-			return prefixes
+		have[p] = true
+	}
+	var missing []string
+	for _, r := range requiredPrefixes {
+		if !have[r] {
+			missing = append(missing, r)
 		}
 	}
-	out := make([]string, 0, len(prefixes)+1)
-	out = append(out, "/FMSInfo/")
+	if len(missing) == 0 {
+		return prefixes
+	}
+	out := make([]string, 0, len(missing)+len(prefixes))
+	out = append(out, missing...)
 	out = append(out, prefixes...)
 	return out
 }

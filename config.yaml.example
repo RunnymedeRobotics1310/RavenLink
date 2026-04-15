@@ -7,6 +7,7 @@ bridge:
   poll_interval: 0.05
   log_level: INFO
   record_trigger: fms
+  collect_trigger: fms
   auto_teleop_gap: 5
   nt_disconnect_grace: 15
   launch_on_login: true
@@ -14,8 +15,10 @@ bridge:
 telemetry:
   nt_paths:
     # /FMSInfo/ is always subscribed regardless of this list — required for
-    # match detection. Listed here for visibility.
+    # match detection. /.schema/ is needed for struct types (Pose2d, etc.)
+    # to render correctly in AdvantageScope.
     - /FMSInfo/
+    - /.schema/
     - /SmartDashboard/
     - /Shuffleboard/
   data_dir: ./data

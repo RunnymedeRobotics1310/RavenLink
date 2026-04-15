@@ -29,9 +29,15 @@ func AppDir() (string, error) {
 		return env, nil
 	}
 
-	if wd, err := os.Getwd(); err == nil {
-		if _, err := os.Stat(filepath.Join(wd, "config.yaml")); err == nil {
-			return wd, nil
+	// On Windows, always use %APPDATA%\RavenLink so config and data
+	// live in the same place regardless of how RavenLink was launched
+	// (autostart from System32, double-click from Downloads, terminal).
+	// On macOS/Linux, honour a CWD config.yaml for development.
+	if runtime.GOOS != "windows" {
+		if wd, err := os.Getwd(); err == nil {
+			if _, err := os.Stat(filepath.Join(wd, "config.yaml")); err == nil {
+				return wd, nil
+			}
 		}
 	}
 

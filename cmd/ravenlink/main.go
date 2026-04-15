@@ -75,6 +75,7 @@ bridge:
 telemetry:
   nt_paths:
     - /FMSInfo/
+    - /.schema/
     - /SmartDashboard/
     - /Shuffleboard/
   data_dir: ./data

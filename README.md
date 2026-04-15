@@ -73,6 +73,7 @@ bridge:
 
 telemetry:
   nt_paths:
+    - /.schema/
     - /SmartDashboard/
     - /Shuffleboard/
   data_dir: ./data
