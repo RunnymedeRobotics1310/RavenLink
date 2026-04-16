@@ -114,17 +114,21 @@ func Convert(jsonlData []byte, team int, sessionID string) ([]byte, error) {
 	}
 
 	// Write Start records for each topic (timestamp 0 for control records).
+	// Prepend "NT:" to match WPILib's DataLogManager convention so
+	// AdvantageScope layouts created during live NT4 sessions work with
+	// exported files, and built-in FMS/match detection fires correctly.
+	const ntPrefix = "NT:"
 	for _, tk := range topicOrder {
 		id := entryIDs[tk]
 		wpiType := MapNT4Type(tk.nt4Type)
-		if err := WriteStartRecord(&buf, id, tk.name, wpiType, "", 0); err != nil {
+		if err := WriteStartRecord(&buf, id, ntPrefix+tk.name, wpiType, "", 0); err != nil {
 			return nil, fmt.Errorf("start record %q: %w", tk.name, err)
 		}
 	}
 
 	// Start record for synthetic match event topic.
 	if matchEventID > 0 {
-		if err := WriteStartRecord(&buf, matchEventID, "/RavenLink/MatchEvent", "string", "", 0); err != nil {
+		if err := WriteStartRecord(&buf, matchEventID, ntPrefix+"/RavenLink/MatchEvent", "string", "", 0); err != nil {
 			return nil, fmt.Errorf("start record /RavenLink/MatchEvent: %w", err)
 		}
 	}
