@@ -74,9 +74,16 @@ type Logger struct {
 	cmdCh chan command
 
 	// Actor-owned state. Only the Run goroutine touches these.
-	file            *os.File
-	buf             *bufio.Writer
-	entriesInFile   int // local mirror for writing the session_end trailer
+	file          *os.File
+	buf           *bufio.Writer
+	entriesInFile int // local mirror for writing the session_end trailer
+
+	// latestValues holds the most recent value for every topic seen
+	// since the NT connection was established. When a new session
+	// starts, all buffered values are replayed into the file so that
+	// one-shot topics (/.schema/*, /FMSInfo/MatchNumber, etc.) that
+	// were published before the collect trigger fired are captured.
+	latestValues map[string]ntclient.TopicValue
 
 	// Cross-goroutine counters. entriesWritten is an atomic so rate readers
 	// never race with the writer. activeSessionID is guarded by sidMu.
@@ -98,12 +105,13 @@ func New(valuesCh <-chan ntclient.TopicValue, dataDir string, team int) *Logger 
 	}
 
 	return &Logger{
-		valuesCh:   valuesCh,
-		dataDir:    dataDir,
-		team:       team,
-		robotIP:    fmt.Sprintf("10.%d.%d.2", te, am),
-		pendingDir: pendingDir,
-		cmdCh:      make(chan command, commandBuffer),
+		valuesCh:     valuesCh,
+		dataDir:      dataDir,
+		team:         team,
+		robotIP:      fmt.Sprintf("10.%d.%d.2", te, am),
+		pendingDir:   pendingDir,
+		cmdCh:        make(chan command, commandBuffer),
+		latestValues: make(map[string]ntclient.TopicValue),
 	}
 }
 
@@ -198,13 +206,23 @@ func (l *Logger) handleCommand(c command) {
 	}
 }
 
-// handleValue writes a single TopicValue to the current JSONL file.
+// handleValue buffers the latest value for each topic (so one-shot
+// topics can be replayed at session start) and writes it to the
+// current JSONL file if one is open.
 // Called only from the Run goroutine.
 func (l *Logger) handleValue(tv ntclient.TopicValue) {
+	// Always buffer the latest value regardless of session state.
+	l.latestValues[tv.Name] = tv
+
 	if l.file == nil {
 		return
 	}
 
+	l.writeDataEntry(tv)
+}
+
+// writeDataEntry writes a single TopicValue as a JSONL data line.
+func (l *Logger) writeDataEntry(tv ntclient.TopicValue) {
 	entry := map[string]any{
 		"ts":        unixNow(),
 		"server_ts": tv.ServerTimeMicros,
@@ -249,6 +267,20 @@ func (l *Logger) startSessionLocked() {
 		"robot_ip":   l.robotIP,
 		"session_id": sessionID,
 	})
+
+	// Replay buffered values so the session file contains a complete
+	// state snapshot. This captures one-shot topics (/.schema/*,
+	// /FMSInfo/MatchNumber, etc.) that were published before the
+	// collect trigger fired.
+	replayed := 0
+	for _, tv := range l.latestValues {
+		l.writeDataEntry(tv)
+		replayed++
+	}
+	if replayed > 0 {
+		slog.Info("ntlogger: replayed buffered values into new session", "count", replayed)
+	}
+
 	// session_start is a boundary — make sure it hits disk.
 	l.flushAndSync()
 
