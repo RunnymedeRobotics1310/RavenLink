@@ -86,7 +86,7 @@ ravenbrain:
   url: ""                       # https://... (leave empty for local-only mode)
   username: telemetry-agent
   password: ""
-  batch_size: 500
+  batch_size: 50
   upload_interval: 10
 
 dashboard:

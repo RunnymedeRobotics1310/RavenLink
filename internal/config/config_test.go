@@ -99,8 +99,8 @@ bridge:
 		t.Error("Telemetry.NTPaths: got empty, want defaults")
 	}
 	// Default RavenBrain batch size.
-	if cfg.RavenBrain.BatchSize != 500 {
-		t.Errorf("BatchSize: got %d, want default 500", cfg.RavenBrain.BatchSize)
+	if cfg.RavenBrain.BatchSize != 50 {
+		t.Errorf("BatchSize: got %d, want default 50", cfg.RavenBrain.BatchSize)
 	}
 	if !cfg.Dashboard.Enabled {
 		t.Error("Dashboard.Enabled: got false, want default true")

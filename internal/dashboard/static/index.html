@@ -149,7 +149,8 @@ let RESTART_FIELDS = new Set([
   'team','obs_host','obs_port','obs_password','stop_delay','poll_interval',
   'auto_teleop_gap','nt_disconnect_grace','record_trigger','collect_trigger','nt_paths','data_dir',
   'retention_days','ravenbrain_url','ravenbrain_username','ravenbrain_password',
-  'ravenbrain_batch_size','ravenbrain_upload_interval','dashboard_enabled','dashboard_port'
+  'ravenbrain_batch_size','ravenbrain_upload_interval','dashboard_enabled','dashboard_port',
+  'limelight_enabled','limelight_last_octets','limelight_poll_interval','limelight_timeout_ms'
 ]);
 const FIELD_DESCS = {
   team:'Team number',obs_host:'OBS host',obs_port:'OBS port',obs_password:'OBS password',
@@ -158,7 +159,11 @@ const FIELD_DESCS = {
   record_trigger:'Record trigger',collect_trigger:'Collect trigger',launch_on_login:'Launch on login',nt_paths:'NT path prefixes',data_dir:'Data directory',
   retention_days:'Retention (days)',ravenbrain_url:'RavenBrain URL',ravenbrain_username:'RavenBrain user',ravenbrain_password:'RavenBrain password',
   ravenbrain_batch_size:'Batch size',ravenbrain_upload_interval:'Upload interval (s)',
-  dashboard_enabled:'Dashboard enabled',dashboard_port:'Dashboard port'
+  dashboard_enabled:'Dashboard enabled',dashboard_port:'Dashboard port',
+  limelight_enabled:'Limelight monitor enabled',
+  limelight_last_octets:'Limelight last octets (comma separated)',
+  limelight_poll_interval:'Limelight poll interval (s)',
+  limelight_timeout_ms:'Limelight timeout (ms)'
 };
 const TRIGGER_SELECTS = new Set(['record_trigger','collect_trigger']);
 const SENSITIVE = new Set(['obs_password','ravenbrain_password']);
@@ -166,7 +171,8 @@ const MASKED = '***';
 const SECTIONS = {bridge:['team','obs_host','obs_port','obs_password','stop_delay','poll_interval','log_level','auto_teleop_gap','nt_disconnect_grace','record_trigger','collect_trigger','launch_on_login'],
   telemetry:['nt_paths','data_dir','retention_days'],
   ravenbrain:['ravenbrain_url','ravenbrain_username','ravenbrain_password','ravenbrain_batch_size','ravenbrain_upload_interval'],
-  dashboard:['dashboard_enabled','dashboard_port']};
+  dashboard:['dashboard_enabled','dashboard_port'],
+  limelight:['limelight_enabled','limelight_last_octets','limelight_poll_interval','limelight_timeout_ms']};
 
 // Tabs
 document.querySelectorAll('.tab').forEach(t=>{

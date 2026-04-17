@@ -59,6 +59,10 @@ var restartRequiredFields = []string{
 	"ravenbrain_upload_interval",
 	"dashboard_enabled",
 	"dashboard_port",
+	"limelight_enabled",
+	"limelight_last_octets",
+	"limelight_poll_interval",
+	"limelight_timeout_ms",
 }
 
 // Server is the embedded HTTP dashboard.
@@ -349,6 +353,10 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 		"ravenbrain_upload_interval": cfg.RavenBrain.UploadInterval,
 		"dashboard_enabled":          cfg.Dashboard.Enabled,
 		"dashboard_port":             cfg.Dashboard.Port,
+		"limelight_enabled":          cfg.Limelight.Enabled,
+		"limelight_last_octets":      joinInts(cfg.Limelight.LastOctets, ", "),
+		"limelight_poll_interval":    cfg.Limelight.PollInterval,
+		"limelight_timeout_ms":       cfg.Limelight.TimeoutMS,
 		"restart_required":           restartRequiredFields,
 	}
 
@@ -431,6 +439,27 @@ func (s *Server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 			cfg.Dashboard.Enabled = toBool(val)
 		case "dashboard_port":
 			cfg.Dashboard.Port = toInt(val, cfg.Dashboard.Port)
+		case "limelight_enabled":
+			cfg.Limelight.Enabled = toBool(val)
+		case "limelight_last_octets":
+			parts := strings.Split(val, ",")
+			octets := make([]int, 0, len(parts))
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				if p == "" {
+					continue
+				}
+				n, err := strconv.Atoi(p)
+				if err != nil {
+					continue // validateConfigPost rejects bad input upstream
+				}
+				octets = append(octets, n)
+			}
+			cfg.Limelight.LastOctets = octets
+		case "limelight_poll_interval":
+			cfg.Limelight.PollInterval = toFloat(val, cfg.Limelight.PollInterval)
+		case "limelight_timeout_ms":
+			cfg.Limelight.TimeoutMS = toInt(val, cfg.Limelight.TimeoutMS)
 		}
 	}
 	s.mu.Unlock()
@@ -939,7 +968,44 @@ func validateConfigPost(data map[string]any) error {
 			return fmt.Errorf("team must be between 1 and 9999")
 		}
 	}
+	if v, ok := data["limelight_poll_interval"]; ok {
+		f, err := strconv.ParseFloat(fmt.Sprintf("%v", v), 64)
+		if err != nil || f < 0.1 || f > 60 {
+			return fmt.Errorf("limelight_poll_interval must be between 0.1 and 60 seconds")
+		}
+	}
+	if v, ok := data["limelight_timeout_ms"]; ok {
+		n, err := strconv.Atoi(fmt.Sprintf("%v", v))
+		if err != nil || n < 10 || n > 10000 {
+			return fmt.Errorf("limelight_timeout_ms must be between 10 and 10000")
+		}
+	}
+	if v, ok := data["limelight_last_octets"]; ok {
+		s := strings.TrimSpace(fmt.Sprintf("%v", v))
+		if s != "" {
+			for _, p := range strings.Split(s, ",") {
+				p = strings.TrimSpace(p)
+				if p == "" {
+					continue
+				}
+				n, err := strconv.Atoi(p)
+				if err != nil || n < 1 || n > 254 {
+					return fmt.Errorf("limelight_last_octets entries must be integers between 1 and 254 (got %q)", p)
+				}
+			}
+		}
+	}
 	return nil
+}
+
+// joinInts formats a slice of ints as a comma-separated string for the
+// config GET response. Used for last_octets rendering in the dashboard.
+func joinInts(xs []int, sep string) string {
+	parts := make([]string, len(xs))
+	for i, n := range xs {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, sep)
 }
 
 // ---------- Helpers ----------

@@ -99,7 +99,7 @@ func DefaultConfig() *Config {
 			URL:            "",
 			Username:       "telemetry-agent",
 			Password:       "",
-			BatchSize:      500,
+			BatchSize:      50,
 			UploadInterval: 10,
 		},
 		Dashboard: DashboardConfig{
