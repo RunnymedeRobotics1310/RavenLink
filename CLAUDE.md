@@ -9,10 +9,11 @@ RavenLink — FRC robot data bridge for Team 1310. Written in Go. Produces a sin
 1. Subscribes to NetworkTables (NT4 WebSocket+MessagePack) on the robot
 2. Logs all value changes to JSONL files with timestamps and match markers
 3. Auto-starts/stops OBS Studio recording based on FMS match state
-4. Store-and-forwards telemetry to RavenBrain via JWT-authenticated REST API
-5. Serves a web dashboard for status monitoring, config editing, session browsing, and WPILog export
-6. Exports session data to `.wpilog` format for AdvantageScope
-7. Runs as a system tray icon with launch-on-login
+4. Polls each configured Limelight's `/results` endpoint for uptime and reachability, logged alongside NT data
+5. Store-and-forwards telemetry to RavenBrain via JWT-authenticated REST API
+6. Serves a web dashboard for status monitoring, config editing, session browsing, and WPILog export
+7. Exports session data to `.wpilog` format for AdvantageScope
+8. Runs as a system tray icon with launch-on-login
 
 The RavenBrain server (Micronaut/Java/MySQL) lives at `~/src/1310/RavenBrain`.
 
@@ -58,6 +59,7 @@ internal/
 ├── collect/                  # Runtime pause flag for NT data collection
 ├── dashboard/                # Embedded HTTP server + static HTML + session list + WPILog export
 ├── lifecycle/                # Self-restart (exec/spawn) + OpenBrowser + OpenFile
+├── limelight/                # HTTP poller for /results on each Limelight (uptime + reachability)
 ├── ntclient/                 # NT4 WebSocket+MessagePack client
 ├── ntlogger/                 # JSONL writing, session lifecycle, match markers
 ├── obsclient/                # OBS WebSocket v5 (wraps goobs)
@@ -103,6 +105,8 @@ third_party/
 14. **"Open in AdvantageScope" saves then opens** — `POST /api/sessions/{id}/open` converts the JSONL to WPILog, saves it to `data/wpilog/`, then calls `lifecycle.OpenFile()` which delegates to the OS default handler for `.wpilog` files. The saved file persists so re-opening is instant.
 
 15. **`--minimized` flag** — `autostart_darwin.go` (LaunchAgent plist) and `autostart_windows.go` (Run key) both register RavenLink with a `--minimized` argument. This flag is handled by `config.ParseFlags` (otherwise `flag.ExitOnError` would kill the auto-launched process!) and causes `main.go` to skip the browser auto-open. First-run (team==0) still opens the browser even when `--minimized`, because the user needs to complete setup.
+
+16. **Limelight monitor rides the NT channel** — `internal/limelight/Monitor` polls `http://10.TE.AM.<octet>:5807/results` on a fixed interval and emits `ntclient.TopicValue` messages on its own output channel. The fan-out goroutine in `cmd/ravenlink/main.go` merges that channel into `logCh` alongside `nt.Values()`, so Limelight entries inherit session-lifecycle gating, replay buffering, upload, and WPILog export with no downstream code changes. Two topics per camera: `/RavenLink/Limelight/<octet>/uptime_ms` (int, ms since boot from the `ts` field) and `/RavenLink/Limelight/<octet>/reachable` (boolean). On any poll failure only `reachable=false` is emitted, so absence of `uptime_ms` updates correlates exactly with runs of `reachable=false`. The purpose is to distinguish **Limelight reboot** (uptime resets while reachable stays true) from **network outage** (reachable flips false), both of which present identically from the robot code's perspective.
 
 ### FMS bitmask layout
 
@@ -153,6 +157,7 @@ Everything else is stdlib: `net/http`, `encoding/json`, `log/slog`, `embed`, `co
 | `telemetry` | nt_paths, retention_days |
 | `ravenbrain` | batch_size, upload_interval |
 | `dashboard` | — (restart required) |
+| `limelight` | — (restart required; enabled/last_octets/poll_interval/timeout_ms) |
 
 Immutable fields (team, obs_host, obs_port) require a restart — dashboard shows a "restart required" indicator after edit.
 

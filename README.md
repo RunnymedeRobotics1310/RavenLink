@@ -8,6 +8,7 @@ Runs on the Driver Station laptop and:
 
 - **Captures all NetworkTables data** — subscribes to configurable path prefixes, logs every value change to JSONL files with timestamps
 - **Auto starts/stops OBS recording** — based on FMS match state (or manual/practice mode)
+- **Monitors Limelight uptime** — polls each camera's `/results` endpoint so you can distinguish "Limelight rebooted mid-match" from "we lost network to the Limelight" in post-match review
 - **Store-and-forward upload** — data saved locally first, uploaded to RavenBrain when internet is available (with idempotent retry and JWT auth)
 - **Web dashboard** at `http://localhost:8080` — live status, log viewer, session browser, config editor, restart/shutdown buttons
 - **WPILog export** — convert any session to `.wpilog` and open directly in AdvantageScope from the dashboard
@@ -89,6 +90,12 @@ ravenbrain:
 dashboard:
   enabled: true
   port: 8080
+
+limelight:
+  enabled: true
+  last_octets: [11, 12]            # 10.TE.AM.<octet> for each camera
+  poll_interval: 1.0               # seconds between polls
+  timeout_ms: 200                  # per-request HTTP timeout
 ```
 
 Any setting can also be overridden by CLI flag — run `ravenlink --help` for the full list.
@@ -104,6 +111,44 @@ Both `record_trigger` (OBS recording) and `collect_trigger` (NT data logging + u
 | `any` | Any robot enable | Any enable triggers recording/collection |
 
 All three modes use the same stop logic: robot disable → auto-teleop gap tolerance → `stop_delay` → stop.
+
+## Limelight Uptime Monitor
+
+RavenLink polls each configured Limelight camera's `/results` HTTP endpoint once per second and records two synthetic topics into the same session JSONL file as NetworkTables data:
+
+- `/RavenLink/Limelight/<octet>/uptime_ms` — the Limelight's reported time since boot, in milliseconds (the `ts` field from `/results`)
+- `/RavenLink/Limelight/<octet>/reachable` — `true` if the poll succeeded within the timeout, `false` otherwise
+
+The point is to separate two failure modes that look identical from the robot code's perspective but have very different root causes:
+
+| What happened | How it shows up in the data |
+|---|---|
+| **Limelight rebooted** (power glitch, firmware crash, brownout, manual reset) | `uptime_ms` drops to a small value between adjacent samples while `reachable` stays `true` the whole time |
+| **Network outage** (Ethernet unplugged, radio dropout, switch died, Limelight powered off) | `reachable` flips to `false` for a stretch; no `uptime_ms` updates during that stretch |
+
+In AdvantageScope, plot `uptime_ms` as a line chart — in a healthy session it grows monotonically, with clean downward resets at reboots. Plot `reachable` as a digital/boolean signal — every dip to `false` marks a network outage you can correlate against the match timeline.
+
+On a failed poll (timeout, connection refused, HTTP non-2xx, malformed JSON, or missing `ts` field) the monitor emits only `reachable=false` — silence would be ambiguous (is the Limelight down, or is RavenLink itself down?), so the explicit `false` entry disambiguates.
+
+### Configuration
+
+```yaml
+limelight:
+  enabled: true            # set false to disable entirely (zero runtime cost)
+  last_octets: [11, 12]    # 10.TE.AM.<octet>:5807 for each camera
+  poll_interval: 1.0       # seconds between polls per camera
+  timeout_ms: 200          # HTTP request timeout (short on purpose)
+```
+
+IPs are derived from the team number: for team 1310, `last_octets: [11, 12]` polls `http://10.13.10.11:5807/results` and `http://10.13.10.12:5807/results`. Add or remove octets to match your actual installation.
+
+Config is editable in the dashboard (`http://localhost:8080` → Config tab → limelight section). Changes require a restart, which the dashboard triggers automatically on Save.
+
+### What It Doesn't Do
+
+- Does not monitor Limelight pipeline output, vision targets, or pose data. If the robot publishes those over NetworkTables (which it usually does), they're already captured by the NT subscription.
+- Does not raise real-time alerts. The goal is durable post-match analysis, not live paging.
+- Does not back off for unreachable Limelights. Every tick polls every configured IP regardless of prior state, so you get a consistent sample cadence even across long outages.
 
 ## Building
 
@@ -275,6 +320,12 @@ On any of these, RavenLink performs a two-phase shutdown:
 - For home practice, use `record_trigger: auto` (DS Practice button) or `any`
 - In `auto` mode, plain teleop enable won't trigger — must enter auto mode
 
+**Limelight `reachable=false` but I can ping it**
+- RavenLink polls from the machine running it (the DS laptop). Make sure that laptop is on the robot subnet — a laptop on the venue WiFi can't reach `10.TE.AM.11`.
+- The default 200 ms timeout is aggressive. A busy Limelight running a complex pipeline can occasionally exceed it, producing sporadic `reachable=false` blips. Raise `limelight.timeout_ms` to 500 or 1000 if you see this.
+- Verify the Limelight's REST server is enabled (it is by default; some reimaging workflows disable it).
+- Check the last-octet list actually matches your installation. If you only have one camera at `.11`, set `last_octets: [11]`.
+
 **Data not uploading**
 - Check `ravenbrain.url` is set in config
 - Verify `username` and `password` for the `telemetry-agent` service account
@@ -299,6 +350,7 @@ internal/
 ├── config/                   # YAML config, CLI flags, save-and-restart
 ├── dashboard/                # Embedded HTTP dashboard + static UI + session list + WPILog export
 ├── lifecycle/                # Self-restart (exec/spawn), OpenBrowser, OpenFile
+├── limelight/                # HTTP poller for Limelight /results (uptime + reachability)
 ├── ntclient/                 # NT4 WebSocket+MessagePack client
 ├── ntlogger/                 # JSONL writing, session lifecycle, match markers
 ├── obsclient/                # OBS WebSocket (via goobs library)
