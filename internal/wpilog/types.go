@@ -42,7 +42,13 @@ func EncodeValue(nt4Type string, v any) ([]byte, error) {
 		return encodeDouble(v) // promoted to double
 	case "string", "json":
 		return encodeString(v)
-	case "raw", "msgpack", "protobuf":
+	case "raw", "msgpack", "protobuf", "structschema":
+		// structschema is the NT4 type for /.schema/struct:* entries
+		// (the schema text describing a struct's field layout).
+		// AdvantageScope needs these in the WPILog to unpack
+		// struct:Pose2d values into .translation.x/.y/.rotation.value
+		// virtual sub-keys; without them, struct entries appear as
+		// opaque raw bytes.
 		return encodeRaw(v)
 	case "boolean[]":
 		return encodeBooleanArray(v)

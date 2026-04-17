@@ -213,6 +213,23 @@ func TestEncodeValue_Raw_Base64(t *testing.T) {
 	}
 }
 
+// TestEncodeValue_StructSchema pins that /.schema/struct:* entries
+// (NT4 type "structschema") survive WPILog export. Without these,
+// AdvantageScope cannot unpack struct values into virtual sub-keys.
+func TestEncodeValue_StructSchema(t *testing.T) {
+	// Real Pose2d schema text: "Translation2d translation;Rotation2d rotation"
+	const schemaText = "Translation2d translation;Rotation2d rotation"
+	// base64 of that string
+	const schemaB64 = "VHJhbnNsYXRpb24yZCB0cmFuc2xhdGlvbjtSb3RhdGlvbjJkIHJvdGF0aW9u"
+	b, err := EncodeValue("structschema", schemaB64)
+	if err != nil {
+		t.Fatalf("structschema must encode (treated as raw): %v", err)
+	}
+	if string(b) != schemaText {
+		t.Errorf("schema bytes mismatch:\n  got:  %q\n  want: %q", string(b), schemaText)
+	}
+}
+
 func TestEncodeValue_BooleanArray(t *testing.T) {
 	b, err := EncodeValue("boolean[]", []any{true, false, true})
 	if err != nil {
