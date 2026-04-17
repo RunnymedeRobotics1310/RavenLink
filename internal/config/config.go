@@ -17,6 +17,7 @@ type Config struct {
 	Telemetry  TelemetryConfig  `yaml:"telemetry"`
 	RavenBrain RavenBrainConfig `yaml:"ravenbrain"`
 	Dashboard  DashboardConfig  `yaml:"dashboard"`
+	Limelight  LimelightConfig  `yaml:"limelight"`
 
 	// Minimized is a runtime-only flag (not persisted to YAML) set by
 	// --minimized on the command line. When true, auto-launched
@@ -62,6 +63,16 @@ type DashboardConfig struct {
 	Port    int  `yaml:"port"`
 }
 
+// LimelightConfig holds settings for the Limelight uptime monitor.
+// Each configured last-octet is polled at 10.TE.AM.<octet>:5807/results
+// every PollInterval seconds with a TimeoutMS per-request deadline.
+type LimelightConfig struct {
+	Enabled      bool    `yaml:"enabled"`
+	LastOctets   []int   `yaml:"last_octets"`
+	PollInterval float64 `yaml:"poll_interval"`
+	TimeoutMS    int     `yaml:"timeout_ms"`
+}
+
 // DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
@@ -95,6 +106,12 @@ func DefaultConfig() *Config {
 			Enabled: true,
 			Port:    8080,
 		},
+		Limelight: LimelightConfig{
+			Enabled:      true,
+			LastOctets:   []int{11, 12},
+			PollInterval: 1.0,
+			TimeoutMS:    200,
+		},
 	}
 }
 
@@ -115,6 +132,14 @@ func LoadConfig(path string) (*Config, error) {
 	// Backfill fields missing from older config files.
 	if cfg.Bridge.CollectTrigger == "" {
 		cfg.Bridge.CollectTrigger = "fms"
+	}
+	// Limelight section was added later; a config predating it parses
+	// with the zero values for LimelightConfig. Zero-valued PollInterval
+	// and TimeoutMS are unusable, so treat them as the sentinel for
+	// "section absent" and re-apply defaults.
+	if cfg.Limelight.PollInterval == 0 && cfg.Limelight.TimeoutMS == 0 && cfg.Limelight.LastOctets == nil {
+		def := DefaultConfig().Limelight
+		cfg.Limelight = def
 	}
 
 	return cfg, nil

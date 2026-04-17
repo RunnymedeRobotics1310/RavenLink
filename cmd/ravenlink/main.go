@@ -21,6 +21,7 @@ import (
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/config"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/dashboard"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/lifecycle"
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/limelight"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/ntclient"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/ntlogger"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/obsclient"
@@ -91,6 +92,12 @@ ravenbrain:
 dashboard:
   enabled: true
   port: 8080
+
+limelight:
+  enabled: true                 # poll Limelight /results endpoint for uptime
+  last_octets: [11, 12]         # 10.TE.AM.<octet> for each camera
+  poll_interval: 1.0            # seconds between polls per camera
+  timeout_ms: 200               # per-request HTTP timeout
 `
 	return os.WriteFile(path, []byte(tmpl), 0o600)
 }
@@ -292,7 +299,28 @@ func main() {
 			statemachine.WithRecordTrigger(cfg.Bridge.CollectTrigger),
 		)
 
-		// NT logger — fans out the single NT values channel.
+		// Limelight monitor — optional. When enabled, emits uptime and
+		// reachability values as TopicValues that ride the same logger
+		// pipeline as NetworkTables data.
+		var llValues <-chan ntclient.TopicValue
+		if cfg.Limelight.Enabled {
+			lm := limelight.New(
+				cfg.Bridge.Team,
+				cfg.Limelight.LastOctets,
+				time.Duration(cfg.Limelight.PollInterval*float64(time.Second)),
+				time.Duration(cfg.Limelight.TimeoutMS)*time.Millisecond,
+				32,
+			)
+			llValues = lm.Values()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				lm.Run(ctx)
+			}()
+		}
+
+		// NT logger — fans out the single NT values channel, and merges
+		// Limelight monitor output into the same logger input channel.
 		logCh := make(chan ntclient.TopicValue, 512)
 		fmsCh = make(chan ntclient.TopicValue, 64)
 		wg.Add(1)
@@ -317,6 +345,17 @@ func main() {
 						case fmsCh <- v:
 						default:
 						}
+					}
+				case v, ok := <-llValues:
+					// When Limelight monitor is disabled, llValues is
+					// nil and this case never fires.
+					if !ok {
+						llValues = nil
+						continue
+					}
+					select {
+					case logCh <- v:
+					default:
 					}
 				}
 			}

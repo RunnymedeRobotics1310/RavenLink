@@ -105,6 +105,89 @@ bridge:
 	if !cfg.Dashboard.Enabled {
 		t.Error("Dashboard.Enabled: got false, want default true")
 	}
+	// Limelight section was omitted; defaults should be applied.
+	if !cfg.Limelight.Enabled {
+		t.Error("Limelight.Enabled: got false, want default true")
+	}
+	if len(cfg.Limelight.LastOctets) != 2 || cfg.Limelight.LastOctets[0] != 11 || cfg.Limelight.LastOctets[1] != 12 {
+		t.Errorf("Limelight.LastOctets: got %v, want default [11 12]", cfg.Limelight.LastOctets)
+	}
+	if cfg.Limelight.PollInterval != 1.0 {
+		t.Errorf("Limelight.PollInterval: got %v, want default 1.0", cfg.Limelight.PollInterval)
+	}
+	if cfg.Limelight.TimeoutMS != 200 {
+		t.Errorf("Limelight.TimeoutMS: got %d, want default 200", cfg.Limelight.TimeoutMS)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestLimelightRoundTrip — a YAML file with an explicit limelight section
+// should round-trip all four fields faithfully.
+// ---------------------------------------------------------------------------
+
+func TestLimelightRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ll.yaml")
+	writeFile(t, path, `
+bridge:
+  team: 1310
+limelight:
+  enabled: false
+  last_octets: [11, 12, 13]
+  poll_interval: 2.5
+  timeout_ms: 500
+`)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Limelight.Enabled {
+		t.Error("Enabled: want false")
+	}
+	if got := cfg.Limelight.LastOctets; len(got) != 3 || got[2] != 13 {
+		t.Errorf("LastOctets: got %v, want [11 12 13]", got)
+	}
+	if cfg.Limelight.PollInterval != 2.5 {
+		t.Errorf("PollInterval: got %v, want 2.5", cfg.Limelight.PollInterval)
+	}
+	if cfg.Limelight.TimeoutMS != 500 {
+		t.Errorf("TimeoutMS: got %d, want 500", cfg.Limelight.TimeoutMS)
+	}
+}
+
+// TestLimelightEmptyOctets — an explicit empty last_octets list is
+// honored as "no cameras to poll", not treated as a missing-section
+// signal. This distinguishes "I disabled via empty list" from "the
+// section wasn't in my config file at all".
+func TestLimelightEmptyOctets(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ll-empty.yaml")
+	writeFile(t, path, `
+bridge:
+  team: 1310
+limelight:
+  enabled: true
+  last_octets: []
+  poll_interval: 1.0
+  timeout_ms: 200
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Limelight.LastOctets == nil {
+		t.Error("LastOctets: nil (should be empty but non-nil slice after explicit [])")
+	}
+	if len(cfg.Limelight.LastOctets) != 0 {
+		t.Errorf("LastOctets: got %v, want empty", cfg.Limelight.LastOctets)
+	}
+	// PollInterval and TimeoutMS were explicitly set, so backfill must
+	// NOT override them back to defaults.
+	if cfg.Limelight.PollInterval != 1.0 || cfg.Limelight.TimeoutMS != 200 {
+		t.Errorf("defaults should be preserved for explicit set: got pi=%v tmo=%d",
+			cfg.Limelight.PollInterval, cfg.Limelight.TimeoutMS)
+	}
 }
 
 // ---------------------------------------------------------------------------
