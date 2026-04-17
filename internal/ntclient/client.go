@@ -241,12 +241,15 @@ func (c *Client) session(ctx context.Context) (connected bool, err error) {
 	topics := make(map[int]topicInfo)
 
 	// Read timeout: if no frame arrives within this window, assume the
-	// connection is dead and bail out. The roboRIO sends NT4 updates
-	// frequently (FMSControlData alone ticks at ~20 Hz), so 5 s of
-	// silence is a strong signal the peer is gone. Without this, a
-	// powered-off robot leaves conn.Read blocking on a half-open TCP
-	// socket for minutes until the OS-level keepalive gives up.
-	const readTimeout = 5 * time.Second
+	// connection is dead and bail out. NT4 servers only emit value
+	// frames on change (plus optional periodic aggregation), so an
+	// idle robot — DS attached but not enabled, FMSControlData stable
+	// at 0x20 — can be silent for tens of seconds between meaningful
+	// updates. 5 s was too aggressive: it churned the connection every
+	// ~5 s during pre-match idle. 30 s comfortably tolerates that
+	// while still detecting a truly dead peer before the OS TCP
+	// keepalive (which can block conn.Read for minutes).
+	const readTimeout = 30 * time.Second
 
 	for {
 		readCtx, readCancel := context.WithTimeout(ctx, readTimeout)
@@ -271,12 +274,15 @@ func (c *Client) session(ctx context.Context) (connected bool, err error) {
 }
 
 // sendSubscribe sends a subscribe message for the given topic prefixes.
+// Each "/foo" prefix is also sent as "foo" so robot code that publishes
+// without a leading slash still matches (see expandSlashlessPrefixVariants).
 func (c *Client) sendSubscribe(ctx context.Context, conn *websocket.Conn, prefixes []string) error {
+	expanded := expandSlashlessPrefixVariants(prefixes)
 	msg := []SubscribeMessage{
 		{
 			Method: "subscribe",
 			Params: SubscribeParams{
-				Topics:  prefixes,
+				Topics:  expanded,
 				SubUID:  1,
 				Options: SubscribeOptions{All: true, Prefix: true},
 			},
@@ -288,7 +294,7 @@ func (c *Client) sendSubscribe(ctx context.Context, conn *websocket.Conn, prefix
 		return fmt.Errorf("marshal subscribe: %w", err)
 	}
 
-	slog.Debug("ntclient: subscribing", "prefixes", prefixes)
+	slog.Debug("ntclient: subscribing", "prefixes", expanded)
 	return conn.Write(ctx, websocket.MessageText, payload)
 }
 
@@ -399,14 +405,56 @@ func (c *Client) handleBinaryFrame(data []byte, topics map[int]topicInfo) error 
 	return nil
 }
 
-// normalizeTopicName collapses consecutive slashes in NT topic paths.
-// Some robot code produces paths like "/Prefix//Sub/key" when the NT
-// prefix ends with "/" and getSubTable prepends another.
+// normalizeTopicName canonicalises NT4 topic paths so that logs and
+// downstream consumers see a consistent shape regardless of how the
+// robot code happens to publish. Two fixes:
+//
+//  1. Ensure a leading "/" — some robot code (e.g. getStructTopic with
+//     a non-slash-prefixed table name) publishes "1310/OdoDebug/..."
+//     instead of "/1310/OdoDebug/...". AdvantageScope treats both as
+//     equivalent; we do the same.
+//  2. Collapse consecutive slashes — "/Prefix//Sub/key" → "/Prefix/Sub/key"
+//     (happens when a table path ends in "/" and getSubTable prepends
+//     another).
 func normalizeTopicName(name string) string {
+	if name != "" && name[0] != '/' {
+		name = "/" + name
+	}
 	for strings.Contains(name, "//") {
 		name = strings.ReplaceAll(name, "//", "/")
 	}
 	return name
+}
+
+// expandSlashlessPrefixVariants mirrors AdvantageScope's "leading slash
+// is optional" treatment into the subscription we send. The NT4 server
+// does a literal string-prefix match, so if the user subscribes to
+// "/1310/foo" but the robot happens to publish "1310/foo" (no leading
+// slash), the server won't match. For each prefix that starts with "/",
+// this returns both the original and a slashless variant — harmless
+// duplication, but means a filter like "/1310/OdoDebug/Odometry/Pose"
+// now matches regardless of whether the robot publisher included a
+// leading slash.
+//
+// Input order is preserved; variants are inserted immediately after
+// their parent. Duplicates (if any) are removed.
+func expandSlashlessPrefixVariants(prefixes []string) []string {
+	out := make([]string, 0, len(prefixes)*2)
+	seen := make(map[string]bool, len(prefixes)*2)
+	add := func(p string) {
+		if seen[p] {
+			return
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	for _, p := range prefixes {
+		add(p)
+		if strings.HasPrefix(p, "/") {
+			add(strings.TrimPrefix(p, "/"))
+		}
+	}
+	return out
 }
 
 // typeNameToID maps a type name string (from announce) to a type ID constant.
