@@ -89,11 +89,11 @@ func TestMonitor_HappyPath(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing uptime_ms in %+v", got)
 	}
-	if uptime.Type != "int" {
-		t.Errorf("uptime type: got %q, want %q", uptime.Type, "int")
+	if uptime.Type != "double" {
+		t.Errorf("uptime type: got %q, want %q", uptime.Type, "double")
 	}
-	if v, ok := uptime.Value.(int64); !ok || v != 12345 {
-		t.Errorf("uptime value: got %v (%T), want int64(12345)", uptime.Value, uptime.Value)
+	if v, ok := uptime.Value.(float64); !ok || v != 12345.0 {
+		t.Errorf("uptime value: got %v (%T), want float64(12345)", uptime.Value, uptime.Value)
 	}
 
 	reachable, ok := findByName(got, "/RavenLink/Limelight/11/reachable")
@@ -141,6 +141,45 @@ func TestMonitor_MultipleOctets(t *testing.T) {
 	}
 }
 
+// TestMonitor_FloatTS — Limelight returns ts with sub-millisecond
+// precision as a JSON float (e.g. "ts":588916.439519). Must decode
+// cleanly as a double, not reject as an int parse error. Pins the
+// bug that caused ~every poll to report reachable=false in the wild
+// with "cannot unmarshal number X.Y into Go struct field ... int64".
+func TestMonitor_FloatTS(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ts":588916.439519}`))
+	}))
+	defer server.Close()
+
+	m := newTestMonitor(t, server.URL, []int{11}, 10*time.Second, 500*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	got := collect(t, m.Values(), 2, 2*time.Second)
+	if len(got) < 2 {
+		t.Fatalf("expected 2 values (uptime + reachable=true), got %d: %+v", len(got), got)
+	}
+
+	uptime, ok := findByName(got, "/RavenLink/Limelight/11/uptime_ms")
+	if !ok {
+		t.Fatalf("missing uptime_ms (float ts was rejected?): %+v", got)
+	}
+	if uptime.Type != "double" {
+		t.Errorf("uptime type: got %q, want %q", uptime.Type, "double")
+	}
+	if v, ok := uptime.Value.(float64); !ok || v != 588916.439519 {
+		t.Errorf("uptime value: got %v (%T), want float64(588916.439519)", uptime.Value, uptime.Value)
+	}
+
+	reachable, _ := findByName(got, "/RavenLink/Limelight/11/reachable")
+	if v, _ := reachable.Value.(bool); !v {
+		t.Errorf("reachable should be true when float ts decodes cleanly, got %v", reachable.Value)
+	}
+}
+
 // TestMonitor_ZeroTS — a freshly-booted Limelight reports ts=0. That
 // is a legitimate value, not a sentinel — must emit uptime=0 plus
 // reachable=true, not reachable=false.
@@ -162,7 +201,7 @@ func TestMonitor_ZeroTS(t *testing.T) {
 	}
 
 	uptime, _ := findByName(got, "/RavenLink/Limelight/11/uptime_ms")
-	if v, ok := uptime.Value.(int64); !ok || v != 0 {
+	if v, ok := uptime.Value.(float64); !ok || v != 0 {
 		t.Errorf("uptime value: got %v, want 0", uptime.Value)
 	}
 	reachable, _ := findByName(got, "/RavenLink/Limelight/11/reachable")
@@ -364,10 +403,10 @@ func TestMonitor_RepeatedTicks(t *testing.T) {
 
 	// Pull out uptime values in arrival order to verify the
 	// simulated-reboot pattern is visible.
-	var uptimes []int64
+	var uptimes []float64
 	for _, v := range got {
 		if v.Name == "/RavenLink/Limelight/11/uptime_ms" {
-			uptimes = append(uptimes, v.Value.(int64))
+			uptimes = append(uptimes, v.Value.(float64))
 		}
 	}
 	if len(uptimes) < 3 {

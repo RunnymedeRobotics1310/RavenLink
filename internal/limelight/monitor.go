@@ -147,11 +147,14 @@ func (m *Monitor) tick(ctx context.Context) {
 }
 
 // limelightResponse is the minimal shape we care about from the
-// /results JSON body. A pointer distinguishes "field absent" from
-// "field present with value 0" (a freshly-booted Limelight is at
-// ts=0 and is a legitimate datapoint, not an error).
+// /results JSON body. The ts field is "milliseconds since boot" but
+// Limelight returns it as a float with sub-millisecond precision
+// (e.g. 588916.439519), so we decode into *float64. A pointer
+// distinguishes "field absent" from "field present with value 0"
+// (a freshly-booted Limelight is at ts=0 and is a legitimate
+// datapoint, not an error).
 type limelightResponse struct {
-	TS *int64 `json:"ts"`
+	TS *float64 `json:"ts"`
 }
 
 // poll issues one request to octet's Limelight. On success it sends
@@ -192,7 +195,7 @@ func (m *Monitor) poll(ctx context.Context, octet int) {
 		return
 	}
 
-	m.send(uptimeTopic(octet), "int", *body.TS)
+	m.send(uptimeTopic(octet), "double", *body.TS)
 	m.recordResult(octet, url, true, "")
 }
 
