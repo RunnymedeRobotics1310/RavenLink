@@ -109,8 +109,8 @@ func DefaultConfig() *Config {
 		Limelight: LimelightConfig{
 			Enabled:      true,
 			LastOctets:   []int{11, 12},
-			PollInterval: 1.0,
-			TimeoutMS:    200,
+			PollInterval: 2.0,
+			TimeoutMS:    1000,
 		},
 	}
 }

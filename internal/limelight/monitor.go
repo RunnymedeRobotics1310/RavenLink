@@ -39,6 +39,20 @@ type Monitor struct {
 	httpClient   *http.Client
 	values       chan ntclient.TopicValue
 	pollWG       sync.WaitGroup // tracks in-flight poll goroutines
+
+	// State for transition-based logging. Multiple poll goroutines run
+	// concurrently (one per octet per tick), so map access is guarded.
+	stateMu sync.Mutex
+	states  map[int]octetState
+}
+
+// octetState tracks the last known reachability of a single camera so
+// the monitor can log transitions (reachable↔unreachable) rather than
+// every individual poll result — silencing logs during sustained
+// outages while still surfacing actionable state changes.
+type octetState struct {
+	known     bool // false until we've observed at least one poll
+	reachable bool
 }
 
 // New creates a Monitor that polls each Limelight at
@@ -68,6 +82,7 @@ func newMonitor(urlFor func(int) string, octets []int, pollInterval, timeout tim
 		timeout:      timeout,
 		httpClient:   &http.Client{},
 		values:       make(chan ntclient.TopicValue, bufSize),
+		states:       make(map[int]octetState, len(octets)),
 	}
 }
 
@@ -141,42 +156,73 @@ type limelightResponse struct {
 
 // poll issues one request to octet's Limelight. On success it sends
 // both uptime_ms and reachable=true; on any failure it sends only
-// reachable=false.
+// reachable=false. State transitions (reachable↔unreachable) and the
+// first poll are logged; ongoing failures are silent.
 func (m *Monitor) poll(ctx context.Context, octet int) {
 	reqCtx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
 
 	url := m.urlFor(octet)
+
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
-		m.sendReachable(octet, false)
+		m.recordResult(octet, url, false, fmt.Sprintf("build request: %v", err))
 		return
 	}
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		m.sendReachable(octet, false)
+		m.recordResult(octet, url, false, err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		m.sendReachable(octet, false)
+		m.recordResult(octet, url, false, fmt.Sprintf("http %d", resp.StatusCode))
 		return
 	}
 
 	var body limelightResponse
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		m.sendReachable(octet, false)
+		m.recordResult(octet, url, false, fmt.Sprintf("decode json: %v", err))
 		return
 	}
 	if body.TS == nil {
-		m.sendReachable(octet, false)
+		m.recordResult(octet, url, false, "response missing ts field")
 		return
 	}
 
 	m.send(uptimeTopic(octet), "int", *body.TS)
-	m.sendReachable(octet, true)
+	m.recordResult(octet, url, true, "")
+}
+
+// recordResult updates the per-octet reachability state, logs
+// transitions (and the first poll), and emits the reachable TopicValue.
+// Only transitions are logged — sustained outages produce a single WARN
+// on the false transition, not one per failed poll. A string reason is
+// accepted rather than an error so non-error failures (non-2xx, missing
+// field) share the code path cleanly.
+func (m *Monitor) recordResult(octet int, url string, ok bool, reason string) {
+	m.stateMu.Lock()
+	prev := m.states[octet]
+	changed := !prev.known || prev.reachable != ok
+	m.states[octet] = octetState{known: true, reachable: ok}
+	m.stateMu.Unlock()
+
+	if changed {
+		switch {
+		case !prev.known && ok:
+			slog.Info("limelight: poll succeeded", "octet", octet, "url", url)
+		case !prev.known && !ok:
+			slog.Warn("limelight: poll failed", "octet", octet, "url", url, "reason", reason)
+		case prev.reachable && !ok:
+			slog.Warn("limelight: camera went unreachable", "octet", octet, "url", url, "reason", reason)
+		case !prev.reachable && ok:
+			slog.Info("limelight: camera back online", "octet", octet, "url", url)
+		}
+	}
+
+	m.sendReachable(octet, ok)
 }
 
 func (m *Monitor) sendReachable(octet int, reachable bool) {

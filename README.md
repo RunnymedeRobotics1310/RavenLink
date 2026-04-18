@@ -94,8 +94,8 @@ dashboard:
 limelight:
   enabled: true
   last_octets: [11, 12]            # 10.TE.AM.<octet> for each camera
-  poll_interval: 1.0               # seconds between polls
-  timeout_ms: 200                  # per-request HTTP timeout
+  poll_interval: 2.0               # seconds between polls
+  timeout_ms: 1000                 # per-request HTTP timeout
 ```
 
 Any setting can also be overridden by CLI flag — run `ravenlink --help` for the full list.
@@ -136,8 +136,8 @@ On a failed poll (timeout, connection refused, HTTP non-2xx, malformed JSON, or 
 limelight:
   enabled: true            # set false to disable entirely (zero runtime cost)
   last_octets: [11, 12]    # 10.TE.AM.<octet>:5807 for each camera
-  poll_interval: 1.0       # seconds between polls per camera
-  timeout_ms: 200          # HTTP request timeout (short on purpose)
+  poll_interval: 2.0       # seconds between polls per camera
+  timeout_ms: 1000         # HTTP request timeout (longer tolerates a busy pipeline)
 ```
 
 IPs are derived from the team number: for team 1310, `last_octets: [11, 12]` polls `http://10.13.10.11:5807/results` and `http://10.13.10.12:5807/results`. Add or remove octets to match your actual installation.
@@ -322,7 +322,8 @@ On any of these, RavenLink performs a two-phase shutdown:
 
 **Limelight `reachable=false` but I can ping it**
 - RavenLink polls from the machine running it (the DS laptop). Make sure that laptop is on the robot subnet — a laptop on the venue WiFi can't reach `10.TE.AM.11`.
-- The default 200 ms timeout is aggressive. A busy Limelight running a complex pipeline can occasionally exceed it, producing sporadic `reachable=false` blips. Raise `limelight.timeout_ms` to 500 or 1000 if you see this.
+- If you see sporadic `reachable=false` blips, a complex pipeline may be exceeding the 1000 ms timeout. Raise `limelight.timeout_ms` further or check the Limelight's CPU load.
+- The log shows `limelight: camera went unreachable reason=…` on the first failure transition — the `reason` field is the specific error (e.g. `dial tcp 10.13.10.11:5807: connect: connection refused`, `http 404`, `decode json: …`). Sustained failures are silent on purpose; only transitions are logged.
 - Verify the Limelight's REST server is enabled (it is by default; some reimaging workflows disable it).
 - Check the last-octet list actually matches your installation. If you only have one camera at `.11`, set `last_octets: [11]`.
 

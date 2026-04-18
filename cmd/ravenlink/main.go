@@ -96,8 +96,8 @@ dashboard:
 limelight:
   enabled: true                 # poll Limelight /results endpoint for uptime
   last_octets: [11, 12]         # 10.TE.AM.<octet> for each camera
-  poll_interval: 1.0            # seconds between polls per camera
-  timeout_ms: 200               # per-request HTTP timeout
+  poll_interval: 2.0            # seconds between polls per camera
+  timeout_ms: 1000              # per-request HTTP timeout
 `
 	return os.WriteFile(path, []byte(tmpl), 0o600)
 }

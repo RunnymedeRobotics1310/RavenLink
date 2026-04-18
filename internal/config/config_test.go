@@ -112,11 +112,11 @@ bridge:
 	if len(cfg.Limelight.LastOctets) != 2 || cfg.Limelight.LastOctets[0] != 11 || cfg.Limelight.LastOctets[1] != 12 {
 		t.Errorf("Limelight.LastOctets: got %v, want default [11 12]", cfg.Limelight.LastOctets)
 	}
-	if cfg.Limelight.PollInterval != 1.0 {
-		t.Errorf("Limelight.PollInterval: got %v, want default 1.0", cfg.Limelight.PollInterval)
+	if cfg.Limelight.PollInterval != 2.0 {
+		t.Errorf("Limelight.PollInterval: got %v, want default 2.0", cfg.Limelight.PollInterval)
 	}
-	if cfg.Limelight.TimeoutMS != 200 {
-		t.Errorf("Limelight.TimeoutMS: got %d, want default 200", cfg.Limelight.TimeoutMS)
+	if cfg.Limelight.TimeoutMS != 1000 {
+		t.Errorf("Limelight.TimeoutMS: got %d, want default 1000", cfg.Limelight.TimeoutMS)
 	}
 }
 

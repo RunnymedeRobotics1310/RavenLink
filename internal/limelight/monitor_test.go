@@ -1,8 +1,10 @@
 package limelight
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -379,6 +381,89 @@ func TestMonitor_RepeatedTicks(t *testing.T) {
 
 // TestMonitor_EmptyOctets — no octets configured → no HTTP calls,
 // monitor sits idle until ctx is cancelled.
+// TestMonitor_LogsTransitionsNotEveryPoll — a camera that stays down
+// produces exactly one WARN line across many consecutive failures, and
+// a recovery produces exactly one INFO. This is the whole point of
+// transition-based logging vs. per-poll logging.
+func TestMonitor_LogsTransitionsNotEveryPoll(t *testing.T) {
+	// Capture slog output.
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	defer slog.SetDefault(prev)
+
+	m := newMonitor(
+		func(octet int) string { return "http://192.0.2.1:9999/results" }, // always fails
+		[]int{11},
+		20*time.Millisecond,
+		30*time.Millisecond,
+		32,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go m.Run(ctx)
+
+	// Let it tick several times against an unreachable host.
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	// Drain channel so Run exits.
+	for range m.Values() {
+	}
+
+	out := logBuf.String()
+	failCount := strings.Count(out, "limelight: poll failed")
+	unreachableCount := strings.Count(out, "limelight: camera went unreachable")
+	if failCount != 1 {
+		t.Errorf("expected exactly 1 'poll failed' (first-poll transition) across many failures, got %d\nlog:\n%s",
+			failCount, out)
+	}
+	if unreachableCount != 0 {
+		t.Errorf("no 'went unreachable' expected when first state was already unreachable, got %d",
+			unreachableCount)
+	}
+}
+
+// TestMonitor_LogsRecoveryTransition — when a camera goes from
+// unreachable to reachable, a single INFO "camera back online" line is
+// emitted. Verifies the other half of transition logging.
+func TestMonitor_LogsRecoveryTransition(t *testing.T) {
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	defer slog.SetDefault(prev)
+
+	// Start failing, then start succeeding.
+	var healthy atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !healthy.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ts":42}`))
+	}))
+	defer server.Close()
+
+	m := newTestMonitor(t, server.URL, []int{11}, 20*time.Millisecond, 500*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go m.Run(ctx)
+
+	// Let a few failed polls happen first.
+	time.Sleep(100 * time.Millisecond)
+	healthy.Store(true)
+	// Let recovery happen.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	for range m.Values() {
+	}
+
+	out := logBuf.String()
+	backOnline := strings.Count(out, "limelight: camera back online")
+	if backOnline != 1 {
+		t.Errorf("expected exactly 1 'back online' line on recovery, got %d\nlog:\n%s", backOnline, out)
+	}
+}
+
 func TestMonitor_EmptyOctets(t *testing.T) {
 	var hits atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
