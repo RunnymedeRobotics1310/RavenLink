@@ -82,8 +82,9 @@ telemetry:
 
 ravenbrain:
   url: ""                          # empty = local-only mode (no upload)
-  username: telemetry-agent
-  password: ""
+  username: telemetry-agent        # legacy /login mode (RavenBrain)
+  password: ""                     # legacy /login mode (RavenBrain)
+  api_key: ""                      # bearer-token mode (RavenScope); wins if set
   batch_size: 50
   upload_interval: 10
 
@@ -264,6 +265,29 @@ Completed JSONL files in `data/pending/` are uploaded to RavenBrain:
 
 On 401: invalidate token, retry once. On network failure: exponential backoff (5s → 60s).
 
+### Auth Modes
+
+RavenLink supports two ways to authenticate with the upload server:
+
+1. **Legacy username/password (RavenBrain).** Set `ravenbrain.username` and
+   `ravenbrain.password`. RavenLink calls `POST /login` to exchange them for a
+   short-lived JWT and caches it (auto-renewed 5 minutes before expiry).
+2. **API key bearer token (RavenScope).** Set `ravenbrain.api_key` to an
+   `rsk_live_…` token. RavenLink skips `/login` entirely and sends
+   `Authorization: Bearer <api_key>` directly on every request. No cache, no
+   renewal — the key itself is the credential.
+
+If `api_key` is non-empty it wins over `username`/`password`. RavenScope uses
+this mode exclusively; it exposes no `/login` endpoint. Either mode requires
+`ravenbrain.url` to be `https://` — plaintext HTTP is refused.
+
+You can also set the API key on the command line:
+
+```bash
+./ravenlink --ravenbrain-url https://your-workspace.workers.dev \
+            --ravenbrain-api-key rsk_live_…
+```
+
 ## Web Dashboard
 
 `http://localhost:8080` when the bridge is running:
@@ -328,10 +352,11 @@ On any of these, RavenLink performs a two-phase shutdown:
 - Check the last-octet list actually matches your installation. If you only have one camera at `.11`, set `last_octets: [11]`.
 
 **Data not uploading**
-- Check `ravenbrain.url` is set in config
-- Verify `username` and `password` for the `telemetry-agent` service account
+- Check `ravenbrain.url` is set in config (must be `https://`)
+- Legacy mode: verify `username` and `password` for the `telemetry-agent` service account
+- API key mode: verify `api_key` is set to a valid `rsk_live_…` token and not expired/revoked
 - Check dashboard upload status for error messages
-- Repeated 401s → password may have changed on the server
+- Repeated 401s → password may have changed on the server, or the API key was revoked
 
 **Menu bar / system tray icon missing**
 - **macOS**: running the raw binary doesn't register with the Window Server. Build with `./scripts/build-macos.sh` and launch with `open dist/RavenLink.app`. The `.app` bundle sets `LSUIElement=true`, which makes RavenLink a menu-bar-only accessory (no Dock icon, no ⌘-Tab entry).

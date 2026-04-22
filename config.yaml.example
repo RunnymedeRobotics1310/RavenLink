@@ -26,8 +26,18 @@ telemetry:
 
 ravenbrain:
   url: ""
+  # Auth mode: two ways to authenticate with the server.
+  #
+  #  1. Legacy (RavenBrain): set username + password. RavenLink calls
+  #     POST /login to exchange them for a short-lived JWT.
+  #  2. API key (RavenScope): set api_key to an rsk_live_… token. RavenLink
+  #     skips /login entirely and sends Authorization: Bearer <api_key>
+  #     on every request.
+  #
+  # If api_key is non-empty it wins — username/password are ignored.
   username: telemetry-agent
   password: ""
+  api_key: ""
   batch_size: 50
   upload_interval: 10
 

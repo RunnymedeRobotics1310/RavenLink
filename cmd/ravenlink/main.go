@@ -375,6 +375,7 @@ func main() {
 			)
 		}
 		auth = uploader.NewAuth(cfg.RavenBrain.URL, cfg.RavenBrain.Username, cfg.RavenBrain.Password)
+		auth.SetAPIKey(cfg.RavenBrain.APIKey)
 		up = uploader.New(
 			cfg.Telemetry.DataDir,
 			auth,

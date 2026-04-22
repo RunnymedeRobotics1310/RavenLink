@@ -88,6 +88,15 @@ func newAuthForServer(t *testing.T, fs *fakeServer, user, pass string) *Auth {
 	return NewAuth(fs.srv.URL, user, pass)
 }
 
+// newAuthWithKeyForServer constructs an Auth configured for bearer-token
+// mode against the fake server. See newAuthForServer for why we mutate
+// http.DefaultTransport.
+func newAuthWithKeyForServer(t *testing.T, fs *fakeServer, apiKey string) *Auth {
+	t.Helper()
+	trustTestServer(t, fs)
+	return NewAuthWithKey(fs.srv.URL, apiKey)
+}
+
 // trustTestServer configures http.DefaultTransport so it trusts the
 // httptest TLS server's self-signed cert for the duration of the test.
 func trustTestServer(t *testing.T, fs *fakeServer) {
@@ -333,6 +342,208 @@ func TestAuthBaseURL(t *testing.T) {
 				t.Errorf("BaseURL() = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bearer-token (api_key) auth mode — Unit 0-B of the RavenScope plan.
+// When ravenbrain.api_key is set, Auth skips POST /login entirely and
+// returns "Authorization: Bearer <apiKey>" directly. The legacy
+// username/password flow stays intact for RavenBrain compatibility.
+// ---------------------------------------------------------------------------
+
+// TestAuthModeSelection is the table-driven core of the new bearer-token
+// mode. It covers IsConfigured() and GetAuthHeader() across every
+// combination of credentials the config layer can realistically produce,
+// including the "api_key wins over username/password" precedence rule and
+// the "empty string is not-set" edge case.
+func TestAuthModeSelection(t *testing.T) {
+	cases := []struct {
+		name             string
+		baseURL          string
+		apiKey           string
+		username         string
+		password         string
+		wantConfigured   bool
+		wantHeader       string // exact header value; empty means "expect error"
+		wantErrContains  string // substring the error must contain when wantHeader==""
+		wantLoginAllowed bool   // true if a /login HTTP call is acceptable (legacy only)
+	}{
+		{
+			name:             "api_key_only_returns_bearer",
+			baseURL:          "https://example.test",
+			apiKey:           "rsk_live_abc123",
+			wantConfigured:   true,
+			wantHeader:       "Bearer rsk_live_abc123",
+			wantLoginAllowed: false,
+		},
+		{
+			name:             "api_key_wins_over_user_pass",
+			baseURL:          "https://example.test",
+			apiKey:           "rsk_live_wins",
+			username:         "telemetry-agent",
+			password:         "hunter2",
+			wantConfigured:   true,
+			wantHeader:       "Bearer rsk_live_wins",
+			wantLoginAllowed: false,
+		},
+		{
+			name:            "empty_api_key_falls_back_to_legacy_when_creds_present",
+			baseURL:         "https://example.test",
+			apiKey:          "",
+			username:        "u",
+			password:        "p",
+			wantConfigured:  true,
+			wantHeader:      "", // legacy flow would try HTTP — verified separately
+			wantErrContains: "",
+			// This case is validated by a bespoke test below that stubs /login.
+			// We skip GetAuthHeader assertions in the table here.
+		},
+		{
+			name:            "only_baseurl_set_is_not_configured",
+			baseURL:         "https://example.test",
+			wantConfigured:  false,
+			wantErrContains: "not configured",
+		},
+		{
+			name:            "api_key_without_baseurl_is_not_configured",
+			baseURL:         "",
+			apiKey:          "rsk_live_lonely",
+			wantConfigured:  false,
+			wantErrContains: "not configured",
+		},
+		{
+			name:            "api_key_with_plaintext_http_is_refused",
+			baseURL:         "http://bad.example",
+			apiKey:          "rsk_live_plain",
+			wantConfigured:  true, // creds + url are present
+			wantErrContains: "https://",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			auth := NewAuth(c.baseURL, c.username, c.password)
+			auth.SetAPIKey(c.apiKey)
+
+			if got := auth.IsConfigured(); got != c.wantConfigured {
+				t.Errorf("IsConfigured() = %v, want %v", got, c.wantConfigured)
+			}
+
+			// Skip header assertions for the legacy-fallback row — it
+			// requires an HTTP server and is exercised in a dedicated test.
+			if c.name == "empty_api_key_falls_back_to_legacy_when_creds_present" {
+				return
+			}
+
+			got, err := auth.GetAuthHeader()
+			if c.wantHeader != "" {
+				if err != nil {
+					t.Fatalf("GetAuthHeader err = %v, want nil", err)
+				}
+				if got != c.wantHeader {
+					t.Errorf("GetAuthHeader = %q, want %q", got, c.wantHeader)
+				}
+				return
+			}
+			// Error-expected branch.
+			if err == nil {
+				t.Fatalf("GetAuthHeader err = nil, want error containing %q", c.wantErrContains)
+			}
+			if c.wantErrContains != "" && !strings.Contains(err.Error(), c.wantErrContains) {
+				t.Errorf("error %q should contain %q", err.Error(), c.wantErrContains)
+			}
+		})
+	}
+}
+
+// TestAuthBearerSkipsLogin asserts that when api_key is set, GetAuthHeader
+// NEVER makes a /login HTTP call. A fake server with a login handler that
+// fails the test on invocation proves this.
+func TestAuthBearerSkipsLogin(t *testing.T) {
+	fs := newFakeServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("bearer mode must not call /login (got %s %s)", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusTeapot)
+	})
+	auth := newAuthWithKeyForServer(t, fs, "rsk_live_silent")
+
+	for i := 0; i < 3; i++ {
+		got, err := auth.GetAuthHeader()
+		if err != nil {
+			t.Fatalf("call %d: GetAuthHeader: %v", i, err)
+		}
+		if got != "Bearer rsk_live_silent" {
+			t.Errorf("call %d: got %q, want %q", i, got, "Bearer rsk_live_silent")
+		}
+	}
+	if n := fs.loginCount.Load(); n != 0 {
+		t.Errorf("login count: got %d, want 0 (bearer mode must skip /login)", n)
+	}
+}
+
+// TestAuthEmptyAPIKeyFallsBackToLegacy verifies that an empty-string
+// api_key is treated as "not set" — Auth falls through to the legacy
+// username/password flow against /login. Regression guard: trimming or
+// presence checks that accept "" as "configured" would break here.
+func TestAuthEmptyAPIKeyFallsBackToLegacy(t *testing.T) {
+	exp := time.Now().Add(1 * time.Hour).Unix()
+	token := makeJWT(t, map[string]any{"exp": exp})
+	fs := newFakeServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": token})
+	})
+	auth := newAuthForServer(t, fs, "u", "p")
+	auth.SetAPIKey("") // explicit empty => not set
+
+	got, err := auth.GetAuthHeader()
+	if err != nil {
+		t.Fatalf("GetAuthHeader: %v", err)
+	}
+	want := "Bearer " + token
+	if got != want {
+		t.Errorf("header: got %q, want %q", got, want)
+	}
+	if n := fs.loginCount.Load(); n != 1 {
+		t.Errorf("login count: got %d, want 1 (empty api_key must hit /login)", n)
+	}
+}
+
+// TestAuthBearerInvalidateIsNoop — Invalidate() in bearer mode must not
+// corrupt the api_key. Bearer credentials are the api_key itself; there
+// is no cached token to clear, so the next call still returns the same
+// header. Uploader calls Invalidate() on 401, so this matters.
+func TestAuthBearerInvalidateIsNoop(t *testing.T) {
+	auth := NewAuthWithKey("https://example.test", "rsk_live_persistent")
+
+	auth.Invalidate()
+
+	got, err := auth.GetAuthHeader()
+	if err != nil {
+		t.Fatalf("GetAuthHeader after Invalidate: %v", err)
+	}
+	if got != "Bearer rsk_live_persistent" {
+		t.Errorf("got %q, want %q", got, "Bearer rsk_live_persistent")
+	}
+}
+
+// TestAuthBearer401BacksOff asserts the auth-layer contract that makes the
+// uploader's 401-retry-then-backoff loop terminate in bearer mode: after
+// Invalidate() (which postJSON calls on 401), a re-fetch of the header
+// returns the same bearer token with no /login attempt. The uploader's
+// second attempt therefore deterministically fails with 401 again and
+// applyBackoff() is invoked — matching today's 401-on-JWT behaviour.
+func TestAuthBearer401BacksOff(t *testing.T) {
+	auth := NewAuthWithKey("https://example.test", "rsk_live_401")
+
+	h1, err := auth.GetAuthHeader()
+	if err != nil {
+		t.Fatalf("first GetAuthHeader: %v", err)
+	}
+	auth.Invalidate() // uploader's 401 path
+	h2, err := auth.GetAuthHeader()
+	if err != nil {
+		t.Fatalf("second GetAuthHeader: %v", err)
+	}
+	if h1 != h2 || h1 != "Bearer rsk_live_401" {
+		t.Errorf("headers: h1=%q h2=%q, want both %q", h1, h2, "Bearer rsk_live_401")
 	}
 }
 

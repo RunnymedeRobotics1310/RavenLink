@@ -48,11 +48,21 @@ type TelemetryConfig struct {
 	RetentionDays int      `yaml:"retention_days"`
 }
 
-// RavenBrainConfig holds settings for RavenBrain cloud upload.
+// RavenBrainConfig holds settings for RavenBrain / RavenScope cloud upload.
+//
+// Two auth modes are supported:
+//
+//  1. Legacy (RavenBrain): set Username and Password. The uploader calls
+//     POST /login to obtain a JWT, then sends Authorization: Bearer <jwt>.
+//  2. API key (RavenScope): set APIKey. The uploader skips /login and
+//     sends Authorization: Bearer <apiKey> directly on every request.
+//
+// If APIKey is non-empty it wins over Username/Password.
 type RavenBrainConfig struct {
 	URL            string  `yaml:"url"`
 	Username       string  `yaml:"username"`
 	Password       string  `yaml:"password"`
+	APIKey         string  `yaml:"api_key"`
 	BatchSize      int     `yaml:"batch_size"`
 	UploadInterval float64 `yaml:"upload_interval"`
 }
@@ -99,6 +109,7 @@ func DefaultConfig() *Config {
 			URL:            "",
 			Username:       "telemetry-agent",
 			Password:       "",
+			APIKey:         "",
 			BatchSize:      50,
 			UploadInterval: 10,
 		},
@@ -259,9 +270,10 @@ func ParseFlags(cfg *Config) {
 	retentionDays := fs.Int("retention-days", cfg.Telemetry.RetentionDays, "Days to retain local telemetry files")
 
 	// RavenBrain flags
-	ravenbrainURL := fs.String("ravenbrain-url", cfg.RavenBrain.URL, "RavenBrain server URL (empty = local-only mode)")
-	ravenbrainUsername := fs.String("ravenbrain-username", cfg.RavenBrain.Username, "RavenBrain service account username")
-	ravenbrainPassword := fs.String("ravenbrain-password", cfg.RavenBrain.Password, "RavenBrain service account password")
+	ravenbrainURL := fs.String("ravenbrain-url", cfg.RavenBrain.URL, "RavenBrain/RavenScope server URL (empty = local-only mode)")
+	ravenbrainUsername := fs.String("ravenbrain-username", cfg.RavenBrain.Username, "RavenBrain service account username (legacy /login mode)")
+	ravenbrainPassword := fs.String("ravenbrain-password", cfg.RavenBrain.Password, "RavenBrain service account password (legacy /login mode)")
+	ravenbrainAPIKey := fs.String("ravenbrain-api-key", cfg.RavenBrain.APIKey, "RavenScope API key (bearer-token mode; wins over username/password if set)")
 	batchSize := fs.Int("ravenbrain-batch-size", cfg.RavenBrain.BatchSize, "RavenBrain upload batch size")
 	uploadInterval := fs.Float64("ravenbrain-upload-interval", cfg.RavenBrain.UploadInterval, "RavenBrain upload interval in seconds")
 
@@ -306,6 +318,7 @@ func ParseFlags(cfg *Config) {
 	cfg.RavenBrain.URL = *ravenbrainURL
 	cfg.RavenBrain.Username = *ravenbrainUsername
 	cfg.RavenBrain.Password = *ravenbrainPassword
+	cfg.RavenBrain.APIKey = *ravenbrainAPIKey
 	cfg.RavenBrain.BatchSize = *batchSize
 	cfg.RavenBrain.UploadInterval = *uploadInterval
 

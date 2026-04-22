@@ -17,21 +17,31 @@ import (
 
 const expiryMargin = 5 * time.Minute
 
-// Auth manages JWT authentication with a RavenBrain server.
-// It is safe for concurrent use.
+// Auth manages authentication with a RavenBrain or RavenScope server.
+// It supports two modes:
+//
+//  1. Legacy username/password via POST /login → JWT (RavenBrain).
+//  2. Bearer api_key mode (RavenScope): when apiKey is set, every request
+//     carries Authorization: Bearer <apiKey> and no /login call is made.
+//
+// Bearer mode is selected whenever apiKey is non-empty, even if
+// username/password are also set. This lets a single config support
+// both servers during migration. It is safe for concurrent use.
 type Auth struct {
 	mu       sync.Mutex
 	baseURL  string
 	username string
 	password string
+	apiKey   string
 
 	token    string
 	tokenExp time.Time
 }
 
 // NewAuth creates an Auth that authenticates against baseURL using the
-// given credentials. The first token is obtained lazily on the first
-// call to GetAuthHeader.
+// given legacy credentials. The first token is obtained lazily on the
+// first call to GetAuthHeader. To enable bearer mode, call SetAPIKey or
+// use NewAuthWithKey.
 func NewAuth(baseURL, username, password string) *Auth {
 	return &Auth{
 		baseURL:  strings.TrimRight(baseURL, "/"),
@@ -40,17 +50,63 @@ func NewAuth(baseURL, username, password string) *Auth {
 	}
 }
 
-// IsConfigured reports whether the auth has a server URL and credentials.
-func (a *Auth) IsConfigured() bool {
-	return a.baseURL != "" && a.username != "" && a.password != ""
+// NewAuthWithKey creates an Auth that authenticates against baseURL using
+// a bearer api_key. Every request will carry Authorization: Bearer <apiKey>
+// and no /login call will be made.
+func NewAuthWithKey(baseURL, apiKey string) *Auth {
+	return &Auth{
+		baseURL: strings.TrimRight(baseURL, "/"),
+		apiKey:  apiKey,
+	}
 }
 
-// GetAuthHeader returns an "Authorization: Bearer <token>" value string,
-// logging in or renewing the token as needed. Returns an error if the
-// login request fails.
+// SetAPIKey switches Auth into bearer-token mode (if apiKey is non-empty)
+// or back to legacy mode (if apiKey is empty). Intended for config reload
+// and test wiring.
+func (a *Auth) SetAPIKey(apiKey string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.apiKey = apiKey
+}
+
+// IsConfigured reports whether the auth has enough state to make
+// authenticated requests. True when baseURL is set AND either an
+// api_key is set, or both username and password are set.
+func (a *Auth) IsConfigured() bool {
+	if a.baseURL == "" {
+		return false
+	}
+	if a.apiKey != "" {
+		return true
+	}
+	return a.username != "" && a.password != ""
+}
+
+// GetAuthHeader returns an "Authorization: Bearer <token>" value string.
+//
+// In bearer mode (apiKey set) it returns the api_key directly and makes
+// no HTTP call. In legacy mode it logs in against /login and caches the
+// JWT, renewing 5 minutes before expiry. Returns an error if auth is not
+// configured, the base URL is not https://, or the legacy /login call
+// fails.
 func (a *Auth) GetAuthHeader() (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	if !a.IsConfigured() {
+		return "", fmt.Errorf("ravenbrain credentials not configured")
+	}
+
+	// Both auth modes refuse to send credentials over plaintext HTTP.
+	if !strings.HasPrefix(strings.ToLower(a.baseURL), "https://") {
+		return "", fmt.Errorf("ravenbrain_url must use https:// scheme (got %q) — refusing to send credentials over plaintext", a.baseURL)
+	}
+
+	if a.apiKey != "" {
+		// Bearer mode: the api_key is the credential. No /login, no cache,
+		// no renewal. Invalidate() is a no-op in this mode.
+		return "Bearer " + a.apiKey, nil
+	}
 
 	if a.token == "" || time.Now().After(a.tokenExp.Add(-expiryMargin)) {
 		if err := a.login(); err != nil {
@@ -60,10 +116,15 @@ func (a *Auth) GetAuthHeader() (string, error) {
 	return "Bearer " + a.token, nil
 }
 
-// Invalidate forces a re-login on the next call to GetAuthHeader.
+// Invalidate forces a re-login on the next call to GetAuthHeader. In
+// bearer mode this is a no-op: the api_key is the credential and cannot
+// be invalidated client-side.
 func (a *Auth) Invalidate() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.apiKey != "" {
+		return
+	}
 	a.token = ""
 	a.tokenExp = time.Time{}
 }
@@ -74,13 +135,15 @@ func (a *Auth) BaseURL() string {
 }
 
 // login performs POST /login and extracts the JWT from the response.
-// Must be called with a.mu held.
+// Must be called with a.mu held. Only reached in legacy mode — bearer
+// mode returns from GetAuthHeader before ever calling login().
 func (a *Auth) login() error {
-	if !a.IsConfigured() {
+	if a.baseURL == "" || a.username == "" || a.password == "" {
 		return fmt.Errorf("ravenbrain credentials not configured")
 	}
 
-	// Refuse to send credentials over plaintext HTTP.
+	// Callers (GetAuthHeader) already gate on https://, but keep the
+	// check here as defense in depth.
 	if !strings.HasPrefix(strings.ToLower(a.baseURL), "https://") {
 		return fmt.Errorf("ravenbrain_url must use https:// scheme (got %q) — refusing to send credentials over plaintext", a.baseURL)
 	}
