@@ -10,10 +10,40 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 )
+
+// IsSecureURL reports whether the URL is safe to send credentials to.
+// A URL is "secure" if it uses https:// OR if it uses http:// with a
+// loopback host (localhost, 127.x.x.x, ::1). This mirrors the browser
+// "secure context" rule and lets RavenLink talk to a local WPILib sim
+// or a wrangler dev worker at http://localhost:8787 without silently
+// dropping the upload target.
+func IsSecureURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme == "https" {
+		return true
+	}
+	if scheme != "http" {
+		return false
+	}
+	host := u.Hostname()
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	if strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	return false
+}
 
 const expiryMargin = 5 * time.Minute
 
@@ -97,9 +127,10 @@ func (a *Auth) GetAuthHeader() (string, error) {
 		return "", fmt.Errorf("ravenbrain credentials not configured")
 	}
 
-	// Both auth modes refuse to send credentials over plaintext HTTP.
-	if !strings.HasPrefix(strings.ToLower(a.baseURL), "https://") {
-		return "", fmt.Errorf("ravenbrain_url must use https:// scheme (got %q) — refusing to send credentials over plaintext", a.baseURL)
+	// Refuse to send credentials over plaintext HTTP — except to
+	// loopback hosts, which are trusted for sim / local dev.
+	if !IsSecureURL(a.baseURL) {
+		return "", fmt.Errorf("url must use https:// or http://localhost (got %q) — refusing to send credentials over plaintext", a.baseURL)
 	}
 
 	if a.apiKey != "" {
@@ -142,10 +173,9 @@ func (a *Auth) login() error {
 		return fmt.Errorf("ravenbrain credentials not configured")
 	}
 
-	// Callers (GetAuthHeader) already gate on https://, but keep the
-	// check here as defense in depth.
-	if !strings.HasPrefix(strings.ToLower(a.baseURL), "https://") {
-		return fmt.Errorf("ravenbrain_url must use https:// scheme (got %q) — refusing to send credentials over plaintext", a.baseURL)
+	// Callers (GetAuthHeader) already gate, but keep the defense here.
+	if !IsSecureURL(a.baseURL) {
+		return fmt.Errorf("url must use https:// or http://localhost (got %q) — refusing to send credentials over plaintext", a.baseURL)
 	}
 
 	url := a.baseURL + "/login"

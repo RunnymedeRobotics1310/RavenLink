@@ -770,40 +770,38 @@ func buildUploadTargets(cfg *config.Config) []*uploader.Target {
 	var targets []*uploader.Target
 
 	if cfg.RavenBrain.Enabled && cfg.RavenBrain.URL != "" {
-		if !strings.HasPrefix(strings.ToLower(cfg.RavenBrain.URL), "https://") {
-			slog.Warn("!!! INSECURE ravenbrain.url: credentials will NOT be sent — configure https:// to enable upload",
+		if !uploader.IsSecureURL(cfg.RavenBrain.URL) {
+			slog.Warn("!!! INSECURE ravenbrain.url: credentials will NOT be sent — use https:// or http://localhost",
 				"url", cfg.RavenBrain.URL)
+		}
+		auth := uploader.NewAuth(cfg.RavenBrain.URL, cfg.RavenBrain.Username, cfg.RavenBrain.Password)
+		t, err := uploader.NewTarget(
+			"ravenbrain", auth,
+			cfg.RavenBrain.BatchSize,
+			time.Duration(cfg.RavenBrain.UploadInterval*float64(time.Second)),
+		)
+		if err != nil {
+			slog.Error("uploader: failed to build ravenbrain target", "err", err)
 		} else {
-			auth := uploader.NewAuth(cfg.RavenBrain.URL, cfg.RavenBrain.Username, cfg.RavenBrain.Password)
-			t, err := uploader.NewTarget(
-				"ravenbrain", auth,
-				cfg.RavenBrain.BatchSize,
-				time.Duration(cfg.RavenBrain.UploadInterval*float64(time.Second)),
-			)
-			if err != nil {
-				slog.Error("uploader: failed to build ravenbrain target", "err", err)
-			} else {
-				targets = append(targets, t)
-			}
+			targets = append(targets, t)
 		}
 	}
 
 	if cfg.RavenScope.Enabled && cfg.RavenScope.URL != "" {
-		if !strings.HasPrefix(strings.ToLower(cfg.RavenScope.URL), "https://") {
-			slog.Warn("!!! INSECURE ravenscope.url: api key will NOT be sent — configure https:// to enable upload",
+		if !uploader.IsSecureURL(cfg.RavenScope.URL) {
+			slog.Warn("!!! INSECURE ravenscope.url: api key will NOT be sent — use https:// or http://localhost",
 				"url", cfg.RavenScope.URL)
+		}
+		auth := uploader.NewAuthWithKey(cfg.RavenScope.URL, cfg.RavenScope.APIKey)
+		t, err := uploader.NewTarget(
+			"ravenscope", auth,
+			cfg.RavenScope.BatchSize,
+			time.Duration(cfg.RavenScope.UploadInterval*float64(time.Second)),
+		)
+		if err != nil {
+			slog.Error("uploader: failed to build ravenscope target", "err", err)
 		} else {
-			auth := uploader.NewAuthWithKey(cfg.RavenScope.URL, cfg.RavenScope.APIKey)
-			t, err := uploader.NewTarget(
-				"ravenscope", auth,
-				cfg.RavenScope.BatchSize,
-				time.Duration(cfg.RavenScope.UploadInterval*float64(time.Second)),
-			)
-			if err != nil {
-				slog.Error("uploader: failed to build ravenscope target", "err", err)
-			} else {
-				targets = append(targets, t)
-			}
+			targets = append(targets, t)
 		}
 	}
 

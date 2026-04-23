@@ -524,6 +524,49 @@ func TestAuthBearerInvalidateIsNoop(t *testing.T) {
 	}
 }
 
+// TestIsSecureURL — https:// is always secure; http:// only on loopback.
+func TestIsSecureURL(t *testing.T) {
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{"https://brain.team1310.ca", true},
+		{"https://localhost", true},
+		{"http://localhost", true},
+		{"http://localhost:8787", true},
+		{"http://127.0.0.1", true},
+		{"http://127.0.0.1:8787", true},
+		{"http://[::1]:8787", true},
+		{"http://foo.localhost", true},
+		{"http://bad.example", false},
+		{"http://10.13.10.5", false},
+		{"http://192.168.1.1", false},
+		{"", false},
+		{"not-a-url://x", false},
+		{"ftp://localhost", false},
+	}
+	for _, c := range cases {
+		t.Run(c.url, func(t *testing.T) {
+			if got := IsSecureURL(c.url); got != c.want {
+				t.Errorf("IsSecureURL(%q) = %v, want %v", c.url, got, c.want)
+			}
+		})
+	}
+}
+
+// TestAuthLocalhostHTTPAllowed — http://localhost is a permitted auth
+// target so the WPILib sim / wrangler dev Worker works out of the box.
+func TestAuthLocalhostHTTPAllowed(t *testing.T) {
+	auth := NewAuthWithKey("http://localhost:8787", "rsk_test_local")
+	got, err := auth.GetAuthHeader()
+	if err != nil {
+		t.Fatalf("GetAuthHeader for localhost http: %v", err)
+	}
+	if got != "Bearer rsk_test_local" {
+		t.Errorf("got %q", got)
+	}
+}
+
 // TestAuthBearer401BacksOff asserts the auth-layer contract that makes the
 // uploader's 401-retry-then-backoff loop terminate in bearer mode: after
 // Invalidate() (which postJSON calls on 401), a re-fetch of the header
