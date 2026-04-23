@@ -96,7 +96,7 @@
         <h2>Connections</h2>
         <div class="stat"><span class="label">NetworkTables</span><span class="value" id="s-nt">&mdash;</span></div>
         <div class="stat"><span class="label">OBS Studio</span><span class="value" id="s-obs">&mdash;</span></div>
-        <div class="stat"><span class="label">RavenBrain</span><span class="value" id="s-rb">&mdash;</span></div>
+        <div id="s-targets"></div>
       </div>
       <div class="card">
         <h2>Match State</h2>
@@ -118,9 +118,9 @@
       </div>
       <div class="card">
         <h2>Upload</h2>
-        <div class="stat"><span class="label">Pending</span><span class="value" id="s-pending">&mdash;</span></div>
-        <div class="stat"><span class="label">Uploaded</span><span class="value" id="s-uploaded">&mdash;</span></div>
-        <div class="stat"><span class="label">Status</span><span class="value" id="s-ulstatus">&mdash;</span></div>
+        <div id="s-upload-targets">
+          <div class="stat"><span class="label">&nbsp;</span><span class="value">Local-only mode</span></div>
+        </div>
       </div>
     </div>
   </div>
@@ -148,8 +148,12 @@
 let RESTART_FIELDS = new Set([
   'team','obs_host','obs_port','obs_password','stop_delay','poll_interval',
   'auto_teleop_gap','nt_disconnect_grace','record_trigger','collect_trigger','nt_paths','data_dir',
-  'retention_days','ravenbrain_url','ravenbrain_username','ravenbrain_password',
-  'ravenbrain_batch_size','ravenbrain_upload_interval','dashboard_enabled','dashboard_port',
+  'retention_days',
+  'ravenbrain_enabled','ravenbrain_url','ravenbrain_username','ravenbrain_password',
+  'ravenbrain_batch_size','ravenbrain_upload_interval',
+  'ravenscope_enabled','ravenscope_url','ravenscope_api_key',
+  'ravenscope_batch_size','ravenscope_upload_interval',
+  'dashboard_enabled','dashboard_port',
   'limelight_enabled','limelight_last_octets','limelight_poll_interval','limelight_timeout_ms'
 ]);
 const FIELD_DESCS = {
@@ -157,8 +161,11 @@ const FIELD_DESCS = {
   stop_delay:'Stop delay (s)',poll_interval:'Poll interval (s)',log_level:'Log level',
   auto_teleop_gap:'Auto-teleop gap (s)',nt_disconnect_grace:'NT disconnect grace (s)',
   record_trigger:'Record trigger',collect_trigger:'Collect trigger',launch_on_login:'Launch on login',nt_paths:'NT path prefixes',data_dir:'Data directory',
-  retention_days:'Retention (days)',ravenbrain_url:'RavenBrain URL',ravenbrain_username:'RavenBrain user',ravenbrain_password:'RavenBrain password',
+  retention_days:'Retention (days)',
+  ravenbrain_enabled:'RavenBrain enabled',ravenbrain_url:'RavenBrain URL',ravenbrain_username:'RavenBrain user',ravenbrain_password:'RavenBrain password',
   ravenbrain_batch_size:'Batch size',ravenbrain_upload_interval:'Upload interval (s)',
+  ravenscope_enabled:'RavenScope enabled',ravenscope_url:'RavenScope URL',ravenscope_api_key:'RavenScope API key',
+  ravenscope_batch_size:'Batch size',ravenscope_upload_interval:'Upload interval (s)',
   dashboard_enabled:'Dashboard enabled',dashboard_port:'Dashboard port',
   limelight_enabled:'Limelight monitor enabled',
   limelight_last_octets:'Limelight last octets (comma separated)',
@@ -166,11 +173,12 @@ const FIELD_DESCS = {
   limelight_timeout_ms:'Limelight timeout (ms)'
 };
 const TRIGGER_SELECTS = new Set(['record_trigger','collect_trigger']);
-const SENSITIVE = new Set(['obs_password','ravenbrain_password']);
+const SENSITIVE = new Set(['obs_password','ravenbrain_password','ravenscope_api_key']);
 const MASKED = '***';
 const SECTIONS = {bridge:['team','obs_host','obs_port','obs_password','stop_delay','poll_interval','log_level','auto_teleop_gap','nt_disconnect_grace','record_trigger','collect_trigger','launch_on_login'],
   telemetry:['nt_paths','data_dir','retention_days'],
-  ravenbrain:['ravenbrain_url','ravenbrain_username','ravenbrain_password','ravenbrain_batch_size','ravenbrain_upload_interval'],
+  ravenbrain:['ravenbrain_enabled','ravenbrain_url','ravenbrain_username','ravenbrain_password','ravenbrain_batch_size','ravenbrain_upload_interval'],
+  ravenscope:['ravenscope_enabled','ravenscope_url','ravenscope_api_key','ravenscope_batch_size','ravenscope_upload_interval'],
   dashboard:['dashboard_enabled','dashboard_port'],
   limelight:['limelight_enabled','limelight_last_octets','limelight_poll_interval','limelight_timeout_ms']};
 
@@ -200,6 +208,33 @@ function pulseHeartbeat(){
   hb._t=setTimeout(()=>hb.classList.remove('on'),180);
 }
 
+function prettyTargetName(n){
+  if(n==='ravenbrain') return 'RavenBrain';
+  if(n==='ravenscope') return 'RavenScope';
+  return n;
+}
+function renderTargets(targets){
+  const conns=document.getElementById('s-targets');
+  const uploads=document.getElementById('s-upload-targets');
+  if(!conns||!uploads) return;
+  if(!targets||targets.length===0){
+    conns.innerHTML='';
+    uploads.innerHTML='<div class="stat"><span class="label">&nbsp;</span><span class="value">Local-only mode</span></div>';
+    return;
+  }
+  conns.innerHTML=targets.map(t=>{
+    const cc=connClass(t.reachable);
+    const ct=connText(t.reachable);
+    return `<div class="stat"><span class="label">${prettyTargetName(t.name)}</span><span class="value ${cc}">${ct}</span></div>`;
+  }).join('');
+  uploads.innerHTML=targets.map(t=>{
+    const statusText=t.currently_uploading?'Uploading…':(t.last_result||'Idle');
+    return `<div class="stat"><span class="label">${prettyTargetName(t.name)}</span>`+
+      `<span class="value">${t.files_pending} pending · ${t.files_uploaded} sent</span></div>`+
+      `<div class="stat"><span class="label">&nbsp;</span><span class="value" style="font-size:11px;color:#94a3b8">${statusText}</span></div>`;
+  }).join('');
+}
+
 function updateStatus(d){
   pulseHeartbeat();
   document.getElementById('header-status').textContent=d.match_state+(d.obs_recording?' | REC':'');
@@ -207,8 +242,7 @@ function updateStatus(d){
   document.getElementById('s-nt').textContent=connText(d.nt_connected);
   document.getElementById('s-obs').className='value '+connClass(d.obs_connected);
   document.getElementById('s-obs').textContent=connText(d.obs_connected);
-  document.getElementById('s-rb').className='value '+connClass(d.ravenbrain_reachable);
-  document.getElementById('s-rb').textContent=connText(d.ravenbrain_reachable);
+  renderTargets(d.upload_targets||[]);
   document.getElementById('s-state').textContent=d.match_state;
   document.getElementById('s-rec').className='value '+(d.obs_recording?'ok':'');
   document.getElementById('s-rec').textContent=d.obs_recording?'Yes':'No';
@@ -216,9 +250,6 @@ function updateStatus(d){
   document.getElementById('s-entries').textContent=d.entries_written.toLocaleString();
   document.getElementById('s-rate').textContent=d.entries_per_second.toFixed(1)+'/s';
   document.getElementById('s-topics').textContent=d.subscribed_topics;
-  document.getElementById('s-pending').textContent=d.files_pending;
-  document.getElementById('s-uploaded').textContent=d.files_uploaded;
-  document.getElementById('s-ulstatus').textContent=d.currently_uploading?'Uploading...':(d.last_upload_result||'Idle');
   document.getElementById('s-ctrig').textContent=d.collect_trigger||'—';
   const cp=document.getElementById('s-cpaused');
   cp.textContent=d.collect_paused?'Yes':'No';
@@ -245,12 +276,14 @@ function updateStatus(d){
   document.getElementById('log-output').textContent=(d.recent_logs||[]).join('\n');
   const lb=document.getElementById('log-output');
   lb.scrollTop=lb.scrollHeight;
-  // Auto-refresh sessions tab when file counts change.
-  if(_prevPending>=0 && (d.files_pending!==_prevPending||d.files_uploaded!==_prevUploaded)){
+  // Auto-refresh sessions tab when aggregate file counts change.
+  let p=0,u=0;
+  for(const t of (d.upload_targets||[])){ p+=t.files_pending||0; u+=t.files_uploaded||0; }
+  if(_prevPending>=0 && (p!==_prevPending||u!==_prevUploaded)){
     const sessTab=document.getElementById('tab-sessions');
     if(sessTab&&sessTab.classList.contains('active')) loadSessions();
   }
-  _prevPending=d.files_pending; _prevUploaded=d.files_uploaded;
+  _prevPending=p; _prevUploaded=u;
 }
 
 function loadConfig(){

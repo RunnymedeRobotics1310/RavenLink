@@ -52,11 +52,17 @@ var restartRequiredFields = []string{
 	"nt_paths",
 	"data_dir",
 	"retention_days",
+	"ravenbrain_enabled",
 	"ravenbrain_url",
 	"ravenbrain_username",
 	"ravenbrain_password",
 	"ravenbrain_batch_size",
 	"ravenbrain_upload_interval",
+	"ravenscope_enabled",
+	"ravenscope_url",
+	"ravenscope_api_key",
+	"ravenscope_batch_size",
+	"ravenscope_upload_interval",
 	"dashboard_enabled",
 	"dashboard_port",
 	"limelight_enabled",
@@ -329,6 +335,10 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 	if cfg.RavenBrain.Password != "" {
 		rbPwd = maskedPassword
 	}
+	rsAPIKey := ""
+	if cfg.RavenScope.APIKey != "" {
+		rsAPIKey = maskedPassword
+	}
 
 	flat := map[string]any{
 		"team":                       cfg.Bridge.Team,
@@ -346,11 +356,17 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 		"nt_paths":                   strings.Join(cfg.Telemetry.NTPaths, ", "),
 		"data_dir":                   cfg.Telemetry.DataDir,
 		"retention_days":             cfg.Telemetry.RetentionDays,
+		"ravenbrain_enabled":         cfg.RavenBrain.Enabled,
 		"ravenbrain_url":             cfg.RavenBrain.URL,
 		"ravenbrain_username":        cfg.RavenBrain.Username,
 		"ravenbrain_password":        rbPwd,
 		"ravenbrain_batch_size":      cfg.RavenBrain.BatchSize,
 		"ravenbrain_upload_interval": cfg.RavenBrain.UploadInterval,
+		"ravenscope_enabled":         cfg.RavenScope.Enabled,
+		"ravenscope_url":             cfg.RavenScope.URL,
+		"ravenscope_api_key":         rsAPIKey,
+		"ravenscope_batch_size":      cfg.RavenScope.BatchSize,
+		"ravenscope_upload_interval": cfg.RavenScope.UploadInterval,
 		"dashboard_enabled":          cfg.Dashboard.Enabled,
 		"dashboard_port":             cfg.Dashboard.Port,
 		"limelight_enabled":          cfg.Limelight.Enabled,
@@ -423,6 +439,8 @@ func (s *Server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 			cfg.Telemetry.DataDir = val
 		case "retention_days":
 			cfg.Telemetry.RetentionDays = toInt(val, cfg.Telemetry.RetentionDays)
+		case "ravenbrain_enabled":
+			cfg.RavenBrain.Enabled = toBool(val)
 		case "ravenbrain_url":
 			cfg.RavenBrain.URL = val
 		case "ravenbrain_username":
@@ -435,6 +453,18 @@ func (s *Server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 			cfg.RavenBrain.BatchSize = toInt(val, cfg.RavenBrain.BatchSize)
 		case "ravenbrain_upload_interval":
 			cfg.RavenBrain.UploadInterval = toFloat(val, cfg.RavenBrain.UploadInterval)
+		case "ravenscope_enabled":
+			cfg.RavenScope.Enabled = toBool(val)
+		case "ravenscope_url":
+			cfg.RavenScope.URL = val
+		case "ravenscope_api_key":
+			if val != maskedPassword {
+				cfg.RavenScope.APIKey = val
+			}
+		case "ravenscope_batch_size":
+			cfg.RavenScope.BatchSize = toInt(val, cfg.RavenScope.BatchSize)
+		case "ravenscope_upload_interval":
+			cfg.RavenScope.UploadInterval = toFloat(val, cfg.RavenScope.UploadInterval)
 		case "dashboard_enabled":
 			cfg.Dashboard.Enabled = toBool(val)
 		case "dashboard_port":
@@ -980,6 +1010,18 @@ func validateConfigPost(data map[string]any) error {
 			return fmt.Errorf("limelight_timeout_ms must be between 10 and 10000")
 		}
 	}
+	// Upload target sanity: enabled=true with an empty URL is a
+	// silent-no-op trap. Reject it at save time so the operator sees the
+	// problem instead of wondering why files sit in pending/ forever.
+	// Only runs when both keys are present in the same POST — an
+	// isolated toggle of ravenbrain_enabled trusts the stored URL.
+	if err := validateTargetEnabledURL(data, "ravenbrain"); err != nil {
+		return err
+	}
+	if err := validateTargetEnabledURL(data, "ravenscope"); err != nil {
+		return err
+	}
+
 	if v, ok := data["limelight_last_octets"]; ok {
 		s := strings.TrimSpace(fmt.Sprintf("%v", v))
 		if s != "" {
@@ -994,6 +1036,24 @@ func validateConfigPost(data map[string]any) error {
 				}
 			}
 		}
+	}
+	return nil
+}
+
+// validateTargetEnabledURL enforces "enabled=true requires URL". Only
+// flags when both keys are present in the same POST; when only the
+// enabled key is sent, the operator is toggling against the stored URL
+// and we accept it (the stored URL may be non-empty).
+func validateTargetEnabledURL(data map[string]any, prefix string) error {
+	enabledRaw, hasEnabled := data[prefix+"_enabled"]
+	urlRaw, hasURL := data[prefix+"_url"]
+	if !hasEnabled || !hasURL {
+		return nil
+	}
+	enabled := toBool(fmt.Sprintf("%v", enabledRaw))
+	url := strings.TrimSpace(fmt.Sprintf("%v", urlRaw))
+	if enabled && url == "" {
+		return fmt.Errorf("%s_url must be non-empty when %s_enabled is true", prefix, prefix)
 	}
 	return nil
 }
