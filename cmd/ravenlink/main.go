@@ -266,9 +266,16 @@ func main() {
 	// dashboard + tray + browser so the user can configure via UI.
 	// ============================================================
 	if !firstRun {
-		// NT4 client
+		// NT4 client. Use the explicit host override when set (sim /
+		// bring-up scenarios) so we connect to localhost:5810 or a
+		// specified host instead of the team-derived 10.TE.AM.2.
 		nt = ntclient.New("ravenlink", 1024)
-		nt.Connect(cfg.Bridge.Team, 5810, cfg.Telemetry.NTPaths)
+		if cfg.Bridge.NTHost != "" {
+			slog.Info("ntclient: using NT host override", "host", cfg.Bridge.NTHost)
+			nt.ConnectAddress(cfg.Bridge.NTHost, 5810, cfg.Telemetry.NTPaths)
+		} else {
+			nt.Connect(cfg.Bridge.Team, 5810, cfg.Telemetry.NTPaths)
+		}
 		defer nt.Close()
 
 		// OBS client

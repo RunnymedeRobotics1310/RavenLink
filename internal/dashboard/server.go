@@ -47,6 +47,7 @@ var restartRequiredFields = []string{
 	"poll_interval",
 	"auto_teleop_gap",
 	"nt_disconnect_grace",
+	"nt_host",
 	"record_trigger",
 	"collect_trigger",
 	"nt_paths",
@@ -350,6 +351,7 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 		"log_level":                  cfg.Bridge.LogLevel,
 		"auto_teleop_gap":            cfg.Bridge.AutoTeleopGap,
 		"nt_disconnect_grace":        cfg.Bridge.NTDisconnectGrace,
+		"nt_host":                    cfg.Bridge.NTHost,
 		"record_trigger":             cfg.Bridge.RecordTrigger,
 		"collect_trigger":            cfg.Bridge.CollectTrigger,
 		"launch_on_login":            cfg.Bridge.LaunchOnLogin,
@@ -419,6 +421,8 @@ func (s *Server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 			cfg.Bridge.AutoTeleopGap = toFloat(val, cfg.Bridge.AutoTeleopGap)
 		case "nt_disconnect_grace":
 			cfg.Bridge.NTDisconnectGrace = toFloat(val, cfg.Bridge.NTDisconnectGrace)
+		case "nt_host":
+			cfg.Bridge.NTHost = strings.TrimSpace(val)
 		case "record_trigger":
 			cfg.Bridge.RecordTrigger = val
 		case "collect_trigger":

@@ -508,3 +508,24 @@ func TestRobotIP(t *testing.T) {
 		})
 	}
 }
+
+// TestRobotIPOverride — nt_host wins over the team-derived address.
+// Used for WPILib simulator runs and bring-up against non-RoboRIO
+// servers.
+func TestRobotIPOverride(t *testing.T) {
+	cases := []struct {
+		name, host string
+	}{
+		{"localhost", "localhost"},
+		{"127.0.0.1", "127.0.0.1"},
+		{"sim host", "sim.local"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &Config{Bridge: BridgeConfig{Team: 1310, NTHost: c.host}}
+			if got := cfg.RobotIP(); got != c.host {
+				t.Errorf("RobotIP() with NTHost=%q: got %q, want %q", c.host, got, c.host)
+			}
+		})
+	}
+}

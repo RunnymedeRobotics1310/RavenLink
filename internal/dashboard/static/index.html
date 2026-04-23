@@ -147,7 +147,7 @@
 // list covers every field except the two actual hot-reloadable ones.
 let RESTART_FIELDS = new Set([
   'team','obs_host','obs_port','obs_password','stop_delay','poll_interval',
-  'auto_teleop_gap','nt_disconnect_grace','record_trigger','collect_trigger','nt_paths','data_dir',
+  'auto_teleop_gap','nt_disconnect_grace','nt_host','record_trigger','collect_trigger','nt_paths','data_dir',
   'retention_days',
   'ravenbrain_enabled','ravenbrain_url','ravenbrain_username','ravenbrain_password',
   'ravenbrain_batch_size','ravenbrain_upload_interval',
@@ -159,7 +159,7 @@ let RESTART_FIELDS = new Set([
 const FIELD_DESCS = {
   team:'Team number',obs_host:'OBS host',obs_port:'OBS port',obs_password:'OBS password',
   stop_delay:'Stop delay (s)',poll_interval:'Poll interval (s)',log_level:'Log level',
-  auto_teleop_gap:'Auto-teleop gap (s)',nt_disconnect_grace:'NT disconnect grace (s)',
+  auto_teleop_gap:'Auto-teleop gap (s)',nt_disconnect_grace:'NT disconnect grace (s)',nt_host:'NT host override (empty = use team-derived 10.TE.AM.2; "localhost" for sim)',
   record_trigger:'Record trigger',collect_trigger:'Collect trigger',launch_on_login:'Launch on login',nt_paths:'NT path prefixes',data_dir:'Data directory',
   retention_days:'Retention (days)',
   ravenbrain_enabled:'RavenBrain enabled',ravenbrain_url:'RavenBrain URL',ravenbrain_username:'RavenBrain user',ravenbrain_password:'RavenBrain password',
@@ -175,7 +175,7 @@ const FIELD_DESCS = {
 const TRIGGER_SELECTS = new Set(['record_trigger','collect_trigger']);
 const SENSITIVE = new Set(['obs_password','ravenbrain_password','ravenscope_api_key']);
 const MASKED = '***';
-const SECTIONS = {bridge:['team','obs_host','obs_port','obs_password','stop_delay','poll_interval','log_level','auto_teleop_gap','nt_disconnect_grace','record_trigger','collect_trigger','launch_on_login'],
+const SECTIONS = {bridge:['team','nt_host','obs_host','obs_port','obs_password','stop_delay','poll_interval','log_level','auto_teleop_gap','nt_disconnect_grace','record_trigger','collect_trigger','launch_on_login'],
   telemetry:['nt_paths','data_dir','retention_days'],
   ravenbrain:['ravenbrain_enabled','ravenbrain_url','ravenbrain_username','ravenbrain_password','ravenbrain_batch_size','ravenbrain_upload_interval'],
   ravenscope:['ravenscope_enabled','ravenscope_url','ravenscope_api_key','ravenscope_batch_size','ravenscope_upload_interval'],
@@ -218,7 +218,10 @@ function renderTargets(targets){
   const uploads=document.getElementById('s-upload-targets');
   if(!conns||!uploads) return;
   if(!targets||targets.length===0){
-    conns.innerHTML='';
+    // No upload destinations configured. Render explicit placeholders
+    // so the Connections card isn't visually empty and the user
+    // understands why no target rows appear.
+    conns.innerHTML='<div class="stat"><span class="label">Upload targets</span><span class="value" style="color:#94a3b8">None configured</span></div>';
     uploads.innerHTML='<div class="stat"><span class="label">&nbsp;</span><span class="value">Local-only mode</span></div>';
     return;
   }

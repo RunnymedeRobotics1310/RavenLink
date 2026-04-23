@@ -41,6 +41,13 @@ type BridgeConfig struct {
 	LaunchOnLogin     bool    `yaml:"launch_on_login"`
 	AutoTeleopGap     float64 `yaml:"auto_teleop_gap"`
 	NTDisconnectGrace float64 `yaml:"nt_disconnect_grace"`
+
+	// NTHost, when non-empty, overrides the team-derived 10.TE.AM.2
+	// robot address. Intended for connecting to a local WPILib
+	// simulator (nt_host: localhost) or any non-RoboRIO NT4 server.
+	// When set, it also becomes the robot_ip field logged in session
+	// metadata so uploads reflect where the data actually came from.
+	NTHost string `yaml:"nt_host"`
 }
 
 // TelemetryConfig holds settings for NT telemetry logging.
@@ -348,9 +355,14 @@ func (c *Config) SaveConfig(path string) error {
 	return nil
 }
 
-// RobotIP derives the robot IP address from the team number using the
-// FRC convention: 10.TE.AM.2 (e.g., team 1310 -> 10.13.10.2).
+// RobotIP returns the NT4 server host RavenLink should connect to. If
+// Bridge.NTHost is set, it wins. Otherwise the address is derived from
+// the team number using the FRC convention: 10.TE.AM.2 (e.g., team
+// 1310 -> 10.13.10.2).
 func (c *Config) RobotIP() string {
+	if c.Bridge.NTHost != "" {
+		return c.Bridge.NTHost
+	}
 	te := c.Bridge.Team / 100
 	am := c.Bridge.Team % 100
 	return fmt.Sprintf("10.%d.%d.2", te, am)
@@ -380,6 +392,7 @@ func ParseFlags(cfg *Config) {
 	noLaunchOnLogin := fs.Bool("no-launch-on-login", false, "Disable launch-on-login registration")
 	autoTeleopGap := fs.Float64("auto-teleop-gap", cfg.Bridge.AutoTeleopGap, "Max seconds of disabled between auto and teleop before stopping")
 	ntDisconnectGrace := fs.Float64("nt-disconnect-grace", cfg.Bridge.NTDisconnectGrace, "Grace period (seconds) before treating NT disconnect as match over")
+	ntHost := fs.String("nt-host", cfg.Bridge.NTHost, "NT4 server host override (empty = derive 10.TE.AM.2 from team). Use 'localhost' for WPILib sim.")
 
 	// Telemetry flags
 	dataDir := fs.String("data-dir", cfg.Telemetry.DataDir, "Local data directory for JSONL files")
@@ -433,6 +446,7 @@ func ParseFlags(cfg *Config) {
 	cfg.Bridge.CollectTrigger = *collectTrigger
 	cfg.Bridge.AutoTeleopGap = *autoTeleopGap
 	cfg.Bridge.NTDisconnectGrace = *ntDisconnectGrace
+	cfg.Bridge.NTHost = *ntHost
 
 	if *noLaunchOnLogin {
 		cfg.Bridge.LaunchOnLogin = false
