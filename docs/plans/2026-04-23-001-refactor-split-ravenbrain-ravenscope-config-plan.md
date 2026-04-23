@@ -1,9 +1,10 @@
 ---
 title: 'refactor: Split RavenBrain and RavenScope into independent upload targets'
 type: refactor
-status: active
+status: completed
 date: 2026-04-23
 deepened: 2026-04-23
+completed: 2026-04-23
 ---
 
 # refactor: Split RavenBrain and RavenScope into independent upload targets

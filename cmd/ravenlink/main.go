@@ -56,11 +56,12 @@ func logFilePath() string {
 // writeTemplateConfig writes a first-run example config.yaml to path.
 func writeTemplateConfig(path string) error {
 	tmpl := `# RavenLink first-run config template.
-# Edit this file (at minimum, set team, ravenbrain.url, and
-# ravenbrain.password) then relaunch RavenLink.
+# Edit this file (at minimum, set team) then relaunch RavenLink.
+# Enable ravenbrain and/or ravenscope below to activate uploads.
 
 bridge:
   team: 0                       # REQUIRED: your FRC team number
+  nt_host: ""                   # empty = derive 10.TE.AM.2 from team. "localhost" for WPILib sim.
   obs_host: localhost
   obs_port: 4455
   obs_password: ""
@@ -82,10 +83,23 @@ telemetry:
   data_dir: ./data
   retention_days: 30
 
+# RavenBrain (team-hosted server, username/password → JWT).
+# Active only when enabled=true AND url is non-empty.
 ravenbrain:
-  url: ""                       # https://... (leave empty for local-only mode)
+  enabled: true
+  url: ""                       # https://brain.team1310.ca (or leave empty to disable)
   username: telemetry-agent
   password: ""
+  batch_size: 50
+  upload_interval: 10
+
+# RavenScope (Cloudflare Worker, bearer API key — no /login).
+# Independent of ravenbrain; either, both, or neither can run.
+# http://localhost:* is accepted for local wrangler dev; otherwise https:// required.
+ravenscope:
+  enabled: false
+  url: ""
+  api_key: ""                   # rsk_live_…
   batch_size: 50
   upload_interval: 10
 
@@ -143,7 +157,7 @@ func main() {
 				msg := fmt.Sprintf(
 					"First run detected.\n"+
 						"A template config was written to:\n  %s\n"+
-						"Edit it (set team, ravenbrain credentials, etc.) and relaunch.\n"+
+						"Edit it (set team, and optionally configure ravenbrain / ravenscope upload targets) and relaunch.\n"+
 						"Logs: %s\n",
 					filepath.Join(appDir, cfgPath),
 					logFilePath(),
