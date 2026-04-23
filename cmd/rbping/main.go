@@ -108,7 +108,6 @@ func main() {
 
 	// Also verify the Auth package works (same code path as uploader uses)
 	auth := uploader.NewAuth(cfg.RavenBrain.URL, cfg.RavenBrain.Username, cfg.RavenBrain.Password)
-	auth.SetAPIKey(cfg.RavenBrain.APIKey)
 	if !auth.IsConfigured() {
 		fmt.Printf("      ✗ FAIL: auth not configured\n")
 		os.Exit(1)

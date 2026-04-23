@@ -41,6 +41,9 @@ func TestRoundTrip(t *testing.T) {
 	orig.RavenBrain.URL = "https://brain.example"
 	orig.RavenBrain.Username = "tester"
 	orig.RavenBrain.Password = "pw"
+	orig.RavenScope.Enabled = true
+	orig.RavenScope.URL = "https://scope.example"
+	orig.RavenScope.APIKey = "sk-testkey"
 	orig.Dashboard.Enabled = false
 	orig.Dashboard.Port = 9090
 
@@ -296,6 +299,187 @@ func TestLoadMalformedYAML(t *testing.T) {
 	_, err := LoadConfig(path)
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRavenScopeSectionDefaultsWhenAbsent — a YAML without a ravenscope
+// section parses with the disabled default shape, not a zeroed struct.
+// ---------------------------------------------------------------------------
+
+func TestRavenScopeSectionDefaultsWhenAbsent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no-scope.yaml")
+	writeFile(t, path, `
+bridge:
+  team: 1310
+ravenbrain:
+  enabled: true
+  url: https://brain.example
+  username: x
+  password: y
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.RavenScope.Enabled {
+		t.Error("RavenScope.Enabled: want false (default) when section absent")
+	}
+	if cfg.RavenScope.BatchSize != 50 {
+		t.Errorf("RavenScope.BatchSize: got %d, want default 50", cfg.RavenScope.BatchSize)
+	}
+	if cfg.RavenScope.UploadInterval != 10 {
+		t.Errorf("RavenScope.UploadInterval: got %v, want default 10", cfg.RavenScope.UploadInterval)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRavenScopeExplicitSection — an explicit ravenscope section is
+// preserved verbatim.
+// ---------------------------------------------------------------------------
+
+func TestRavenScopeExplicitSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scope.yaml")
+	writeFile(t, path, `
+bridge:
+  team: 1310
+ravenscope:
+  enabled: true
+  url: https://scope.example
+  api_key: sk-abc
+  batch_size: 100
+  upload_interval: 5
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.RavenScope.Enabled {
+		t.Error("RavenScope.Enabled: want true")
+	}
+	if cfg.RavenScope.URL != "https://scope.example" {
+		t.Errorf("RavenScope.URL: got %q", cfg.RavenScope.URL)
+	}
+	if cfg.RavenScope.APIKey != "sk-abc" {
+		t.Errorf("RavenScope.APIKey: got %q", cfg.RavenScope.APIKey)
+	}
+	if cfg.RavenScope.BatchSize != 100 {
+		t.Errorf("RavenScope.BatchSize: got %d, want 100", cfg.RavenScope.BatchSize)
+	}
+	if cfg.RavenScope.UploadInterval != 5 {
+		t.Errorf("RavenScope.UploadInterval: got %v, want 5", cfg.RavenScope.UploadInterval)
+	}
+	// RavenBrain left at defaults; not clobbered.
+	if cfg.RavenBrain.Username != "telemetry-agent" {
+		t.Errorf("RavenBrain.Username should stay at default when only ravenscope is set; got %q", cfg.RavenBrain.Username)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestLegacyAPIKeyMigration — a YAML written by the feat/ravenscope-bearer-auth
+// branch (ravenbrain.api_key set, no ravenscope section) migrates into the
+// split-section shape on load.
+// ---------------------------------------------------------------------------
+
+func TestLegacyAPIKeyMigration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.yaml")
+	writeFile(t, path, `
+bridge:
+  team: 1310
+ravenbrain:
+  url: https://scope.example
+  username: telemetry-agent
+  password: hunter2
+  api_key: sk-legacy-key
+  batch_size: 50
+  upload_interval: 10
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.RavenScope.APIKey != "sk-legacy-key" {
+		t.Errorf("RavenScope.APIKey: got %q, want migrated value", cfg.RavenScope.APIKey)
+	}
+	if cfg.RavenScope.URL != "https://scope.example" {
+		t.Errorf("RavenScope.URL: got %q, want URL copied from legacy ravenbrain.url", cfg.RavenScope.URL)
+	}
+	if !cfg.RavenScope.Enabled {
+		t.Error("RavenScope.Enabled: want true after migration")
+	}
+	// RavenBrain username/password preserved.
+	if cfg.RavenBrain.Username != "telemetry-agent" {
+		t.Errorf("RavenBrain.Username: got %q", cfg.RavenBrain.Username)
+	}
+	if cfg.RavenBrain.Password != "hunter2" {
+		t.Errorf("RavenBrain.Password: got %q", cfg.RavenBrain.Password)
+	}
+	// RavenBrain URL preserved too — the legacy user pointed both at the
+	// same URL; we don't assume otherwise.
+	if cfg.RavenBrain.URL != "https://scope.example" {
+		t.Errorf("RavenBrain.URL: got %q", cfg.RavenBrain.URL)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestLegacyAPIKeyMigrationRespectsExplicitScope — when a YAML has both
+// legacy ravenbrain.api_key AND an explicit ravenscope section, the
+// explicit section wins; migration only strips the stray api_key.
+// ---------------------------------------------------------------------------
+
+func TestLegacyAPIKeyMigrationRespectsExplicitScope(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "both.yaml")
+	writeFile(t, path, `
+bridge:
+  team: 1310
+ravenbrain:
+  url: https://brain.example
+  api_key: sk-should-be-ignored
+ravenscope:
+  enabled: true
+  url: https://scope.example
+  api_key: sk-explicit
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.RavenScope.APIKey != "sk-explicit" {
+		t.Errorf("explicit ravenscope section should win; got %q", cfg.RavenScope.APIKey)
+	}
+	if cfg.RavenScope.URL != "https://scope.example" {
+		t.Errorf("explicit URL should win; got %q", cfg.RavenScope.URL)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestDeprecatedAPIKeyFlag — --ravenbrain-api-key still routes into the
+// new ravenscope section as a deprecated alias.
+// ---------------------------------------------------------------------------
+
+func TestDeprecatedAPIKeyFlag(t *testing.T) {
+	origArgs := os.Args
+	t.Cleanup(func() { os.Args = origArgs })
+
+	os.Args = []string{"ravenlink",
+		"--ravenbrain-url=https://brain.example",
+		"--ravenbrain-api-key=sk-alias-routed",
+	}
+	cfg := DefaultConfig()
+	ParseFlags(cfg)
+
+	if cfg.RavenScope.APIKey != "sk-alias-routed" {
+		t.Errorf("--ravenbrain-api-key should route to ravenscope.api_key; got %q", cfg.RavenScope.APIKey)
+	}
+	if !cfg.RavenScope.Enabled {
+		t.Error("deprecated alias should enable ravenscope")
+	}
+	if cfg.RavenScope.URL == "" {
+		t.Error("deprecated alias should backfill ravenscope.url from ravenbrain.url when unset")
 	}
 }
 

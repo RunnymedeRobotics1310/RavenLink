@@ -5,6 +5,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -16,6 +17,7 @@ type Config struct {
 	Bridge     BridgeConfig     `yaml:"bridge"`
 	Telemetry  TelemetryConfig  `yaml:"telemetry"`
 	RavenBrain RavenBrainConfig `yaml:"ravenbrain"`
+	RavenScope RavenScopeConfig `yaml:"ravenscope"`
 	Dashboard  DashboardConfig  `yaml:"dashboard"`
 	Limelight  LimelightConfig  `yaml:"limelight"`
 
@@ -48,20 +50,29 @@ type TelemetryConfig struct {
 	RetentionDays int      `yaml:"retention_days"`
 }
 
-// RavenBrainConfig holds settings for RavenBrain / RavenScope cloud upload.
+// RavenBrainConfig holds settings for the RavenBrain upload target.
+// Auth is legacy username/password via POST /login; the uploader caches
+// the returned JWT and renews 5 minutes before expiry.
 //
-// Two auth modes are supported:
-//
-//  1. Legacy (RavenBrain): set Username and Password. The uploader calls
-//     POST /login to obtain a JWT, then sends Authorization: Bearer <jwt>.
-//  2. API key (RavenScope): set APIKey. The uploader skips /login and
-//     sends Authorization: Bearer <apiKey> directly on every request.
-//
-// If APIKey is non-empty it wins over Username/Password.
+// A target is considered active when Enabled is true AND URL is non-empty.
+// Enabled=true with an empty URL is a save-time validation error.
 type RavenBrainConfig struct {
+	Enabled        bool    `yaml:"enabled"`
 	URL            string  `yaml:"url"`
 	Username       string  `yaml:"username"`
 	Password       string  `yaml:"password"`
+	BatchSize      int     `yaml:"batch_size"`
+	UploadInterval float64 `yaml:"upload_interval"`
+}
+
+// RavenScopeConfig holds settings for the RavenScope upload target.
+// Auth is a bearer API key sent verbatim on every request — no /login
+// round-trip, no client-side renewal.
+//
+// Same activation rule as RavenBrainConfig: Enabled AND URL non-empty.
+type RavenScopeConfig struct {
+	Enabled        bool    `yaml:"enabled"`
+	URL            string  `yaml:"url"`
 	APIKey         string  `yaml:"api_key"`
 	BatchSize      int     `yaml:"batch_size"`
 	UploadInterval float64 `yaml:"upload_interval"`
@@ -106,9 +117,16 @@ func DefaultConfig() *Config {
 			RetentionDays: 30,
 		},
 		RavenBrain: RavenBrainConfig{
+			Enabled:        true,
 			URL:            "",
 			Username:       "telemetry-agent",
 			Password:       "",
+			BatchSize:      50,
+			UploadInterval: 10,
+		},
+		RavenScope: RavenScopeConfig{
+			Enabled:        false,
+			URL:            "",
 			APIKey:         "",
 			BatchSize:      50,
 			UploadInterval: 10,
@@ -128,14 +146,29 @@ func DefaultConfig() *Config {
 
 // LoadConfig reads a YAML config file at path and returns a Config.
 // Missing fields are filled from DefaultConfig.
+//
+// Before the typed unmarshal, LoadConfig runs a raw-YAML pre-pass to
+// migrate configs from the earlier feat/ravenscope-bearer-auth branch
+// shape — where an `api_key` field lived inside the `ravenbrain` section
+// — into the split-section shape. If `ravenbrain.api_key` is set and no
+// `ravenscope` section exists, the pre-pass synthesizes a `ravenscope`
+// block (enabled: true, same URL, migrated api_key) and strips the key
+// from `ravenbrain`. The migration is logged at INFO; the user-facing
+// consequence is that YAML comments and key ordering are lost when the
+// in-memory config is next saved, which is acceptable given SaveConfig
+// rewrites the whole file on every save anyway.
 func LoadConfig(path string) (*Config, error) {
-	cfg := DefaultConfig()
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config file: %w", err)
 	}
 
+	data, err = migrateLegacyAPIKey(data)
+	if err != nil {
+		return nil, fmt.Errorf("migrating legacy config: %w", err)
+	}
+
+	cfg := DefaultConfig()
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config YAML: %w", err)
 	}
@@ -152,8 +185,91 @@ func LoadConfig(path string) (*Config, error) {
 		def := DefaultConfig().Limelight
 		cfg.Limelight = def
 	}
+	// RavenScope section was added later. Zero-valued BatchSize and
+	// UploadInterval with an empty URL/APIKey is the signal that the
+	// section was absent from the YAML. Restore defaults so the struct
+	// doesn't carry nonsense values.
+	if cfg.RavenScope.BatchSize == 0 && cfg.RavenScope.UploadInterval == 0 &&
+		cfg.RavenScope.URL == "" && cfg.RavenScope.APIKey == "" {
+		cfg.RavenScope = DefaultConfig().RavenScope
+	}
+	// RavenBrain batch/interval defaults for very old configs that never
+	// set them explicitly.
+	if cfg.RavenBrain.BatchSize == 0 {
+		cfg.RavenBrain.BatchSize = DefaultConfig().RavenBrain.BatchSize
+	}
+	if cfg.RavenBrain.UploadInterval == 0 {
+		cfg.RavenBrain.UploadInterval = DefaultConfig().RavenBrain.UploadInterval
+	}
 
 	return cfg, nil
+}
+
+// migrateLegacyAPIKey rewrites legacy `ravenbrain.api_key` into a
+// synthesized top-level `ravenscope:` section, then returns the
+// re-marshaled YAML bytes. Input that does not match the legacy shape is
+// returned unchanged.
+//
+// Legacy shape (feat/ravenscope-bearer-auth commit a34d5f4): a single
+// `ravenbrain:` section carried both legacy username/password and the
+// new `api_key` field. The rewrite:
+//
+//  1. If `ravenbrain.api_key` is absent or empty → no-op.
+//  2. If a top-level `ravenscope:` key already exists → honor the user's
+//     explicit block, just strip `ravenbrain.api_key`.
+//  3. Otherwise synthesize
+//     `ravenscope: {enabled: true, url: <ravenbrain.url>, api_key: <val>}`
+//     and strip `ravenbrain.api_key`.
+func migrateLegacyAPIKey(data []byte) ([]byte, error) {
+	var root map[string]any
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		// Let the typed unmarshal surface the real parse error.
+		return data, nil
+	}
+	if root == nil {
+		return data, nil
+	}
+
+	brainRaw, ok := root["ravenbrain"]
+	if !ok {
+		return data, nil
+	}
+	brain, ok := brainRaw.(map[string]any)
+	if !ok {
+		return data, nil
+	}
+
+	apiKeyRaw, hasKey := brain["api_key"]
+	if !hasKey {
+		return data, nil
+	}
+	apiKey, _ := apiKeyRaw.(string)
+
+	// Always strip the legacy field from ravenbrain.
+	delete(brain, "api_key")
+	root["ravenbrain"] = brain
+
+	// If an explicit ravenscope section already exists, the user has
+	// already migrated by hand — don't clobber it.
+	if _, explicit := root["ravenscope"]; !explicit && apiKey != "" {
+		brainURL, _ := brain["url"].(string)
+		root["ravenscope"] = map[string]any{
+			"enabled": true,
+			"url":     brainURL,
+			"api_key": apiKey,
+		}
+		slog.Info("config: migrated ravenbrain.api_key -> ravenscope.api_key (YAML comments and key order in config.yaml will be lost on next save)")
+	} else if apiKey != "" {
+		slog.Info("config: stripped legacy ravenbrain.api_key (explicit ravenscope section already present)")
+	} else {
+		// api_key was present but empty; silent cleanup.
+	}
+
+	out, err := yaml.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("remarshaling migrated config: %w", err)
+	}
+	return out, nil
 }
 
 // SaveConfig writes the config to the given YAML file path atomically
@@ -246,7 +362,7 @@ func (c *Config) RobotIP() string {
 func ParseFlags(cfg *Config) {
 	fs := flag.NewFlagSet("ravenlink", flag.ExitOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "RavenLink — FRC robot data bridge: OBS recording, NT telemetry, RavenBrain upload\n\n")
+		fmt.Fprintf(fs.Output(), "RavenLink — FRC robot data bridge: OBS recording, NT telemetry, cloud upload\n\n")
 		fmt.Fprintf(fs.Output(), "Usage:\n")
 		fs.PrintDefaults()
 	}
@@ -270,12 +386,23 @@ func ParseFlags(cfg *Config) {
 	retentionDays := fs.Int("retention-days", cfg.Telemetry.RetentionDays, "Days to retain local telemetry files")
 
 	// RavenBrain flags
-	ravenbrainURL := fs.String("ravenbrain-url", cfg.RavenBrain.URL, "RavenBrain/RavenScope server URL (empty = local-only mode)")
-	ravenbrainUsername := fs.String("ravenbrain-username", cfg.RavenBrain.Username, "RavenBrain service account username (legacy /login mode)")
-	ravenbrainPassword := fs.String("ravenbrain-password", cfg.RavenBrain.Password, "RavenBrain service account password (legacy /login mode)")
-	ravenbrainAPIKey := fs.String("ravenbrain-api-key", cfg.RavenBrain.APIKey, "RavenScope API key (bearer-token mode; wins over username/password if set)")
-	batchSize := fs.Int("ravenbrain-batch-size", cfg.RavenBrain.BatchSize, "RavenBrain upload batch size")
-	uploadInterval := fs.Float64("ravenbrain-upload-interval", cfg.RavenBrain.UploadInterval, "RavenBrain upload interval in seconds")
+	ravenbrainURL := fs.String("ravenbrain-url", cfg.RavenBrain.URL, "RavenBrain server URL (empty or --no-ravenbrain to disable)")
+	ravenbrainUsername := fs.String("ravenbrain-username", cfg.RavenBrain.Username, "RavenBrain service account username")
+	ravenbrainPassword := fs.String("ravenbrain-password", cfg.RavenBrain.Password, "RavenBrain service account password")
+	ravenbrainBatchSize := fs.Int("ravenbrain-batch-size", cfg.RavenBrain.BatchSize, "RavenBrain upload batch size")
+	ravenbrainUploadInterval := fs.Float64("ravenbrain-upload-interval", cfg.RavenBrain.UploadInterval, "RavenBrain upload interval in seconds")
+	noRavenBrain := fs.Bool("no-ravenbrain", false, "Disable the RavenBrain upload target")
+
+	// Deprecated alias: --ravenbrain-api-key routes into the RavenScope
+	// section. Remove once the bearer-auth branch has been rolled out.
+	deprecatedAPIKey := fs.String("ravenbrain-api-key", "", "Deprecated: use --ravenscope-api-key (routes to ravenscope for now)")
+
+	// RavenScope flags
+	ravenscopeURL := fs.String("ravenscope-url", cfg.RavenScope.URL, "RavenScope server URL")
+	ravenscopeAPIKey := fs.String("ravenscope-api-key", cfg.RavenScope.APIKey, "RavenScope bearer API key")
+	ravenscopeBatchSize := fs.Int("ravenscope-batch-size", cfg.RavenScope.BatchSize, "RavenScope upload batch size")
+	ravenscopeUploadInterval := fs.Float64("ravenscope-upload-interval", cfg.RavenScope.UploadInterval, "RavenScope upload interval in seconds")
+	ravenscopeEnabled := fs.Bool("ravenscope-enabled", cfg.RavenScope.Enabled, "Enable the RavenScope upload target")
 
 	// Dashboard flags
 	dashboardPort := fs.Int("dashboard-port", cfg.Dashboard.Port, "Dashboard HTTP port")
@@ -294,8 +421,7 @@ func ParseFlags(cfg *Config) {
 
 	_ = fs.Parse(os.Args[1:])
 
-	// Apply overrides — every flag is applied since defaults already come
-	// from the loaded config.
+	// Apply overrides.
 	cfg.Bridge.Team = *team
 	cfg.Bridge.OBSHost = *obsHost
 	cfg.Bridge.OBSPort = *obsPort
@@ -318,9 +444,26 @@ func ParseFlags(cfg *Config) {
 	cfg.RavenBrain.URL = *ravenbrainURL
 	cfg.RavenBrain.Username = *ravenbrainUsername
 	cfg.RavenBrain.Password = *ravenbrainPassword
-	cfg.RavenBrain.APIKey = *ravenbrainAPIKey
-	cfg.RavenBrain.BatchSize = *batchSize
-	cfg.RavenBrain.UploadInterval = *uploadInterval
+	cfg.RavenBrain.BatchSize = *ravenbrainBatchSize
+	cfg.RavenBrain.UploadInterval = *ravenbrainUploadInterval
+	if *noRavenBrain {
+		cfg.RavenBrain.Enabled = false
+	}
+
+	cfg.RavenScope.URL = *ravenscopeURL
+	cfg.RavenScope.APIKey = *ravenscopeAPIKey
+	cfg.RavenScope.BatchSize = *ravenscopeBatchSize
+	cfg.RavenScope.UploadInterval = *ravenscopeUploadInterval
+	cfg.RavenScope.Enabled = *ravenscopeEnabled
+
+	if *deprecatedAPIKey != "" {
+		slog.Warn("--ravenbrain-api-key is deprecated; use --ravenscope-api-key. Value routed to ravenscope.api_key.")
+		cfg.RavenScope.APIKey = *deprecatedAPIKey
+		if cfg.RavenScope.URL == "" {
+			cfg.RavenScope.URL = cfg.RavenBrain.URL
+		}
+		cfg.RavenScope.Enabled = true
+	}
 
 	cfg.Dashboard.Port = *dashboardPort
 	if *noDashboard {
