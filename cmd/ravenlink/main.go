@@ -251,7 +251,6 @@ func main() {
 		obs   *obsclient.Client
 		ntLog *ntlogger.Logger
 		up    *uploader.Uploader
-		auth  *uploader.Auth
 		sm    *statemachine.Machine
 		// collectSM drives NT logger session lifecycle + uploader gating.
 		// It's a second statemachine.Machine running in parallel with sm,
@@ -368,18 +367,15 @@ func main() {
 			ntLog.Run(ctx)
 		}()
 
-		// Uploader + auth
-		if cfg.RavenBrain.URL != "" && !strings.HasPrefix(strings.ToLower(cfg.RavenBrain.URL), "https://") {
-			slog.Warn("!!! INSECURE ravenbrain_url: credentials will NOT be sent — configure https:// to enable upload",
-				"ravenbrain_url", cfg.RavenBrain.URL,
-			)
-		}
-		auth = uploader.NewAuth(cfg.RavenBrain.URL, cfg.RavenBrain.Username, cfg.RavenBrain.Password)
+		// Uploader + targets. A target runs when its section is Enabled
+		// AND its URL is non-empty; anything else (disabled, unset URL,
+		// or failed construction) silently drops the target. An empty
+		// targets slice is a valid state — the uploader goroutine exits
+		// immediately and files stay in pending/ (local-only mode).
+		targets := buildUploadTargets(cfg)
 		up = uploader.New(
 			cfg.Telemetry.DataDir,
-			auth,
-			cfg.RavenBrain.BatchSize,
-			time.Duration(cfg.RavenBrain.UploadInterval*float64(time.Second)),
+			targets,
 			func() string { return ntLog.Stats().ActiveSessionID },
 		)
 		up.SetPauseFn(collectState.Paused)
@@ -673,17 +669,28 @@ func runMainLoop(
 		case <-statusTicker.C:
 			// Periodic full status refresh
 			stats := ntLog.Stats()
+			targetSnaps := make([]status.UploadTargetStatus, 0, len(up.Targets()))
+			totalPending := 0
+			for _, tgt := range up.Targets() {
+				snap := tgt.Snapshot()
+				targetSnaps = append(targetSnaps, status.UploadTargetStatus{
+					Name:               snap.Name,
+					Enabled:            snap.Enabled,
+					Reachable:          snap.Reachable,
+					FilesPending:       snap.FilesPending,
+					FilesUploaded:      snap.FilesUploaded,
+					CurrentlyUploading: snap.CurrentlyUploading,
+					LastResult:         snap.LastResult,
+				})
+				totalPending += snap.FilesPending
+			}
 			st.Update(func(s *status.Status) {
 				s.NTConnected = nt.Connected()
 				s.OBSConnected = obs.IsConnected()
-				s.RavenBrainReachable = up.Reachable
 				s.MatchState = stateName(sm.State)
 				s.ActiveSessionFile = stats.ActiveSessionID
 				s.EntriesWritten = stats.EntriesWritten
-				s.FilesPending = up.FilesPending
-				s.FilesUploaded = up.FilesUploaded
-				s.LastUploadResult = up.LastUploadResult
-				s.CurrentlyUploading = up.CurrentlyUploading
+				s.UploadTargets = targetSnaps
 				s.OBSRecording = sm.State == statemachine.RecordingAuto || sm.State == statemachine.RecordingTeleop
 				s.CollectTrigger = cfg.Bridge.CollectTrigger
 				s.CollectPaused = collectState.Paused()
@@ -701,7 +708,7 @@ func runMainLoop(
 				"fms", fmt.Sprintf("%v", fms),
 				"state", stateName(sm.State),
 				"entries", stats.EntriesWritten,
-				"pending", up.FilesPending,
+				"pending", totalPending,
 			)
 		}
 	}
@@ -744,6 +751,56 @@ func (h *dashLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 func (h *dashLogHandler) WithGroup(name string) slog.Handler {
 	return &dashLogHandler{inner: h.inner.WithGroup(name), hook: h.hook}
+}
+
+// buildUploadTargets instantiates one uploader.Target per enabled
+// config section (ravenbrain + ravenscope). A target is only built when
+// its Enabled flag is true AND its URL is non-empty. Any plaintext http://
+// URL is logged as insecure and skipped — credentials must not traverse
+// a plaintext connection. Returns an empty slice when nothing should
+// upload; the caller treats that as local-only mode.
+func buildUploadTargets(cfg *config.Config) []*uploader.Target {
+	var targets []*uploader.Target
+
+	if cfg.RavenBrain.Enabled && cfg.RavenBrain.URL != "" {
+		if !strings.HasPrefix(strings.ToLower(cfg.RavenBrain.URL), "https://") {
+			slog.Warn("!!! INSECURE ravenbrain.url: credentials will NOT be sent — configure https:// to enable upload",
+				"url", cfg.RavenBrain.URL)
+		} else {
+			auth := uploader.NewAuth(cfg.RavenBrain.URL, cfg.RavenBrain.Username, cfg.RavenBrain.Password)
+			t, err := uploader.NewTarget(
+				"ravenbrain", auth,
+				cfg.RavenBrain.BatchSize,
+				time.Duration(cfg.RavenBrain.UploadInterval*float64(time.Second)),
+			)
+			if err != nil {
+				slog.Error("uploader: failed to build ravenbrain target", "err", err)
+			} else {
+				targets = append(targets, t)
+			}
+		}
+	}
+
+	if cfg.RavenScope.Enabled && cfg.RavenScope.URL != "" {
+		if !strings.HasPrefix(strings.ToLower(cfg.RavenScope.URL), "https://") {
+			slog.Warn("!!! INSECURE ravenscope.url: api key will NOT be sent — configure https:// to enable upload",
+				"url", cfg.RavenScope.URL)
+		} else {
+			auth := uploader.NewAuthWithKey(cfg.RavenScope.URL, cfg.RavenScope.APIKey)
+			t, err := uploader.NewTarget(
+				"ravenscope", auth,
+				cfg.RavenScope.BatchSize,
+				time.Duration(cfg.RavenScope.UploadInterval*float64(time.Second)),
+			)
+			if err != nil {
+				slog.Error("uploader: failed to build ravenscope target", "err", err)
+			} else {
+				targets = append(targets, t)
+			}
+		}
+	}
+
+	return targets
 }
 
 func stateName(s statemachine.State) string {

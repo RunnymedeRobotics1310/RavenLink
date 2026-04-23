@@ -16,9 +16,8 @@ type Status struct {
 	mu sync.RWMutex
 
 	// Connections
-	NTConnected        bool `json:"nt_connected"`
-	OBSConnected       bool `json:"obs_connected"`
-	RavenBrainReachable bool `json:"ravenbrain_reachable"`
+	NTConnected  bool `json:"nt_connected"`
+	OBSConnected bool `json:"obs_connected"`
 
 	// State machine
 	MatchState string `json:"match_state"`
@@ -29,11 +28,10 @@ type Status struct {
 	EntriesPerSecond  float64 `json:"entries_per_second"`
 	SubscribedTopics  int     `json:"subscribed_topics"`
 
-	// Upload
-	FilesPending     int    `json:"files_pending"`
-	FilesUploaded    int    `json:"files_uploaded"`
-	LastUploadResult string `json:"last_upload_result"`
-	CurrentlyUploading bool  `json:"currently_uploading"`
+	// Upload — one entry per configured destination (ravenbrain, ravenscope).
+	// Empty slice = local-only mode (no destinations). Always non-nil so
+	// the dashboard JS can iterate safely.
+	UploadTargets []UploadTargetStatus `json:"upload_targets"`
 
 	// OBS
 	OBSRecording bool `json:"obs_recording"`
@@ -47,11 +45,26 @@ type Status struct {
 	RecentLogs []string `json:"recent_logs"`
 }
 
+// UploadTargetStatus is the per-destination slice entry in Status.UploadTargets.
+// One row per configured-and-enabled upload target. Field names are the
+// dashboard JSON contract; the embedded index.html iterates this array
+// to render status rows.
+type UploadTargetStatus struct {
+	Name               string `json:"name"`
+	Enabled            bool   `json:"enabled"`
+	Reachable          bool   `json:"reachable"`
+	FilesPending       int    `json:"files_pending"`
+	FilesUploaded      int    `json:"files_uploaded"`
+	CurrentlyUploading bool   `json:"currently_uploading"`
+	LastResult         string `json:"last_result"`
+}
+
 // New returns a Status initialised with idle defaults.
 func New() *Status {
 	return &Status{
-		MatchState: "IDLE",
-		RecentLogs: make([]string, 0, maxLogs),
+		MatchState:    "IDLE",
+		RecentLogs:    make([]string, 0, maxLogs),
+		UploadTargets: []UploadTargetStatus{},
 	}
 }
 

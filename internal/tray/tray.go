@@ -124,8 +124,15 @@ func (t *Tray) UpdateStatus(st *status.Status) {
 		obsRecording = s.OBSRecording
 		matchState = s.MatchState
 		entriesWritten = s.EntriesWritten
-		brainConfigured = s.RavenBrainReachable
-		filesPending = s.FilesPending
+		// Aggregate placeholder until U6 gives each target its own menu
+		// item. Any reachable target → green; any pending file counts
+		// toward the shown total.
+		for _, t := range s.UploadTargets {
+			if t.Reachable {
+				brainConfigured = true
+			}
+			filesPending += t.FilesPending
+		}
 	})
 
 	// Determine colour.
