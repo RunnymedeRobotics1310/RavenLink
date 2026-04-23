@@ -37,6 +37,14 @@ type Client struct {
 	client    *goobs.Client
 	connected atomic.Bool
 	wg        sync.WaitGroup
+
+	// probeInFlight guards against goroutine accumulation. When a
+	// health-check probe times out, the goroutine running the goobs
+	// RPC stays alive until Disconnect() propagates. If that doesn't
+	// happen promptly (certain WebSocket failure modes), the next
+	// health tick must not spawn a second goroutine — doing so every
+	// 5 s for 24 h would leak ~17 k goroutines.
+	probeInFlight atomic.Bool
 }
 
 // New creates a new OBS client targeting the given host:port with the
@@ -137,6 +145,10 @@ func (c *Client) healthCheckLoop(ctx context.Context) {
 // probeHealth performs one health check iteration. It never holds the
 // mutex across the network call, and uses callWithTimeout so a hung OBS
 // cannot block the loop.
+//
+// The probeInFlight guard ensures that at most one goroutine is blocked
+// inside a goobs RPC at any time. Without this, a hung OBS connection
+// leaks one goroutine per health tick (~17 k/day).
 func (c *Client) probeHealth() {
 	c.mu.Lock()
 	client := c.client
@@ -153,7 +165,16 @@ func (c *Client) probeHealth() {
 		return
 	}
 
+	// If a previous probe's goroutine is still stuck in a goobs RPC
+	// (Disconnect didn't unblock it), skip this tick to prevent
+	// unbounded goroutine accumulation.
+	if !c.probeInFlight.CompareAndSwap(false, true) {
+		slog.Debug("OBS health check still in flight, skipping")
+		return
+	}
+
 	_, err := callWithTimeout(func() (any, error) {
+		defer c.probeInFlight.Store(false)
 		return client.General.GetVersion()
 	}, obsCallTimeout)
 
@@ -305,8 +326,8 @@ func (c *Client) tryReconnect(method string) {
 
 // callWithTimeout runs fn in a goroutine and returns its result, or an
 // error if it doesn't complete within timeout. If the timeout fires the
-// goroutine is leaked (bounded leak — it will exit when OBS eventually
-// responds or the underlying connection is closed).
+// goroutine is leaked until fn returns (bounded by connection close) or
+// the process exits.
 func callWithTimeout[T any](fn func() (T, error), timeout time.Duration) (T, error) {
 	type result struct {
 		v   T
@@ -317,10 +338,12 @@ func callWithTimeout[T any](fn func() (T, error), timeout time.Duration) (T, err
 		v, err := fn()
 		ch <- result{v: v, err: err}
 	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case r := <-ch:
 		return r.v, r.err
-	case <-time.After(timeout):
+	case <-timer.C:
 		var zero T
 		return zero, errors.New("obs call timed out")
 	}
