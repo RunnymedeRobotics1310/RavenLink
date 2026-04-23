@@ -84,9 +84,11 @@ third_party/
 
 4. **Match markers decoupled from OBS actions** — `match_start` fires at state transition into `RecordingAuto`, `match_end` fires at transition into `StopPending` (the actual disable time, not 10s later when OBS stops).
 
-5. **Server-side upload progress** — The server tracks `uploadedCount` per session (transactional with batch INSERT). Client queries it on every upload attempt → no duplicates, no `.progress` files, safe on flaky networks.
+5. **Server-side upload progress** — The server tracks `uploadedCount` per session (transactional with batch INSERT). Client queries it on every upload attempt → no duplicates, no `.progress` files, safe on flaky networks. Both RavenBrain and RavenScope implement this contract identically.
 
-6. **JWT auth with auto-renewal** — `POST /login` → cache token → decode `exp` claim → auto-renew 5 minutes before expiry → invalidate + retry once on 401.
+6. **JWT auth with auto-renewal (RavenBrain) + bearer API key (RavenScope)** — `uploader.Auth` supports both modes. RavenBrain: `POST /login` → cache token → decode `exp` claim → auto-renew 5 minutes before expiry → invalidate + retry once on 401. RavenScope: `Authorization: Bearer <api_key>` sent verbatim on every request; no /login; `Invalidate()` is a no-op because the api_key is the credential.
+
+6b. **Multi-target uploader** — `internal/uploader.Uploader` holds `[]*Target`. One goroutine per enabled target runs on its own ticker; each target owns its HTTP client, batch size, backoff state, and status counters (guarded by `Target.mu`). Per-file progress is tracked on disk via `<base>.jsonl.<target>.done` sidecar markers — load-bearing because every `pending/` scanner filters by `HasSuffix(".jsonl")`. A file moves from `pending/` to `uploaded/` only after every currently enabled target has a marker; the move step is serialized by `finalizeMu`. A `finalizeAnyReady()` sweep runs at startup and at the top of each tick to handle "user disabled a target" scenarios where markers already cover the active set. Zero targets configured → local-only mode, files remain in `pending/`.
 
 7. **Dashboard is embedded** — `//go:embed static/*` bakes the HTML/CSS/JS into the binary at compile time.
 
@@ -155,11 +157,14 @@ Everything else is stdlib: `net/http`, `encoding/json`, `log/slog`, `embed`, `co
 |---------|----------------|
 | `bridge` | log_level, stop_delay, poll_interval, auto_teleop_gap, nt_disconnect_grace, record_trigger, collect_trigger, launch_on_login |
 | `telemetry` | nt_paths, retention_days |
-| `ravenbrain` | batch_size, upload_interval |
+| `ravenbrain` | — (restart required; enabled/url/username/password/batch_size/upload_interval) |
+| `ravenscope` | — (restart required; enabled/url/api_key/batch_size/upload_interval) |
 | `dashboard` | — (restart required) |
 | `limelight` | — (restart required; enabled/last_octets/poll_interval/timeout_ms) |
 
 Immutable fields (team, obs_host, obs_port) require a restart — dashboard shows a "restart required" indicator after edit.
+
+Both `ravenbrain` and `ravenscope` sections follow the same activation rule: the target is live only when `enabled: true` AND `url` is non-empty. Dashboard save rejects `enabled: true` with an empty URL at 400. A target left `enabled: true` while permanently unreachable will pile up files in `pending/` indefinitely — by design, we'd rather hold the data than silently drop it. Operators see the backlog in the dashboard's per-target `files_pending` counter and can disable the stuck target to drain.
 
 ## Gotchas
 

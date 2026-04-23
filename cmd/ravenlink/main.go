@@ -56,11 +56,12 @@ func logFilePath() string {
 // writeTemplateConfig writes a first-run example config.yaml to path.
 func writeTemplateConfig(path string) error {
 	tmpl := `# RavenLink first-run config template.
-# Edit this file (at minimum, set team, ravenbrain.url, and
-# ravenbrain.password) then relaunch RavenLink.
+# Edit this file (at minimum, set team) then relaunch RavenLink.
+# Enable ravenbrain and/or ravenscope below to activate uploads.
 
 bridge:
   team: 0                       # REQUIRED: your FRC team number
+  nt_host: ""                   # empty = derive 10.TE.AM.2 from team. "localhost" for WPILib sim.
   obs_host: localhost
   obs_port: 4455
   obs_password: ""
@@ -82,10 +83,23 @@ telemetry:
   data_dir: ./data
   retention_days: 30
 
+# RavenBrain (team-hosted server, username/password → JWT).
+# Active only when enabled=true AND url is non-empty.
 ravenbrain:
-  url: ""                       # https://... (leave empty for local-only mode)
+  enabled: true
+  url: ""                       # https://brain.team1310.ca (or leave empty to disable)
   username: telemetry-agent
   password: ""
+  batch_size: 50
+  upload_interval: 10
+
+# RavenScope (Cloudflare Worker, bearer API key — no /login).
+# Independent of ravenbrain; either, both, or neither can run.
+# http://localhost:* is accepted for local wrangler dev; otherwise https:// required.
+ravenscope:
+  enabled: false
+  url: ""
+  api_key: ""                   # rsk_live_…
   batch_size: 50
   upload_interval: 10
 
@@ -143,7 +157,7 @@ func main() {
 				msg := fmt.Sprintf(
 					"First run detected.\n"+
 						"A template config was written to:\n  %s\n"+
-						"Edit it (set team, ravenbrain credentials, etc.) and relaunch.\n"+
+						"Edit it (set team, and optionally configure ravenbrain / ravenscope upload targets) and relaunch.\n"+
 						"Logs: %s\n",
 					filepath.Join(appDir, cfgPath),
 					logFilePath(),
@@ -251,7 +265,6 @@ func main() {
 		obs   *obsclient.Client
 		ntLog *ntlogger.Logger
 		up    *uploader.Uploader
-		auth  *uploader.Auth
 		sm    *statemachine.Machine
 		// collectSM drives NT logger session lifecycle + uploader gating.
 		// It's a second statemachine.Machine running in parallel with sm,
@@ -267,9 +280,16 @@ func main() {
 	// dashboard + tray + browser so the user can configure via UI.
 	// ============================================================
 	if !firstRun {
-		// NT4 client
+		// NT4 client. Use the explicit host override when set (sim /
+		// bring-up scenarios) so we connect to localhost:5810 or a
+		// specified host instead of the team-derived 10.TE.AM.2.
 		nt = ntclient.New("ravenlink", 1024)
-		nt.Connect(cfg.Bridge.Team, 5810, cfg.Telemetry.NTPaths)
+		if cfg.Bridge.NTHost != "" {
+			slog.Info("ntclient: using NT host override", "host", cfg.Bridge.NTHost)
+			nt.ConnectAddress(cfg.Bridge.NTHost, 5810, cfg.Telemetry.NTPaths)
+		} else {
+			nt.Connect(cfg.Bridge.Team, 5810, cfg.Telemetry.NTPaths)
+		}
 		defer nt.Close()
 
 		// OBS client
@@ -368,18 +388,15 @@ func main() {
 			ntLog.Run(ctx)
 		}()
 
-		// Uploader + auth
-		if cfg.RavenBrain.URL != "" && !strings.HasPrefix(strings.ToLower(cfg.RavenBrain.URL), "https://") {
-			slog.Warn("!!! INSECURE ravenbrain_url: credentials will NOT be sent — configure https:// to enable upload",
-				"ravenbrain_url", cfg.RavenBrain.URL,
-			)
-		}
-		auth = uploader.NewAuth(cfg.RavenBrain.URL, cfg.RavenBrain.Username, cfg.RavenBrain.Password)
+		// Uploader + targets. A target runs when its section is Enabled
+		// AND its URL is non-empty; anything else (disabled, unset URL,
+		// or failed construction) silently drops the target. An empty
+		// targets slice is a valid state — the uploader goroutine exits
+		// immediately and files stay in pending/ (local-only mode).
+		targets := buildUploadTargets(cfg)
 		up = uploader.New(
 			cfg.Telemetry.DataDir,
-			auth,
-			cfg.RavenBrain.BatchSize,
-			time.Duration(cfg.RavenBrain.UploadInterval*float64(time.Second)),
+			targets,
 			func() string { return ntLog.Stats().ActiveSessionID },
 		)
 		up.SetPauseFn(collectState.Paused)
@@ -673,17 +690,28 @@ func runMainLoop(
 		case <-statusTicker.C:
 			// Periodic full status refresh
 			stats := ntLog.Stats()
+			targetSnaps := make([]status.UploadTargetStatus, 0, len(up.Targets()))
+			totalPending := 0
+			for _, tgt := range up.Targets() {
+				snap := tgt.Snapshot()
+				targetSnaps = append(targetSnaps, status.UploadTargetStatus{
+					Name:               snap.Name,
+					Enabled:            snap.Enabled,
+					Reachable:          snap.Reachable,
+					FilesPending:       snap.FilesPending,
+					FilesUploaded:      snap.FilesUploaded,
+					CurrentlyUploading: snap.CurrentlyUploading,
+					LastResult:         snap.LastResult,
+				})
+				totalPending += snap.FilesPending
+			}
 			st.Update(func(s *status.Status) {
 				s.NTConnected = nt.Connected()
 				s.OBSConnected = obs.IsConnected()
-				s.RavenBrainReachable = up.Reachable
 				s.MatchState = stateName(sm.State)
 				s.ActiveSessionFile = stats.ActiveSessionID
 				s.EntriesWritten = stats.EntriesWritten
-				s.FilesPending = up.FilesPending
-				s.FilesUploaded = up.FilesUploaded
-				s.LastUploadResult = up.LastUploadResult
-				s.CurrentlyUploading = up.CurrentlyUploading
+				s.UploadTargets = targetSnaps
 				s.OBSRecording = sm.State == statemachine.RecordingAuto || sm.State == statemachine.RecordingTeleop
 				s.CollectTrigger = cfg.Bridge.CollectTrigger
 				s.CollectPaused = collectState.Paused()
@@ -701,7 +729,7 @@ func runMainLoop(
 				"fms", fmt.Sprintf("%v", fms),
 				"state", stateName(sm.State),
 				"entries", stats.EntriesWritten,
-				"pending", up.FilesPending,
+				"pending", totalPending,
 			)
 		}
 	}
@@ -744,6 +772,54 @@ func (h *dashLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 func (h *dashLogHandler) WithGroup(name string) slog.Handler {
 	return &dashLogHandler{inner: h.inner.WithGroup(name), hook: h.hook}
+}
+
+// buildUploadTargets instantiates one uploader.Target per enabled
+// config section (ravenbrain + ravenscope). A target is only built when
+// its Enabled flag is true AND its URL is non-empty. Any plaintext http://
+// URL is logged as insecure and skipped — credentials must not traverse
+// a plaintext connection. Returns an empty slice when nothing should
+// upload; the caller treats that as local-only mode.
+func buildUploadTargets(cfg *config.Config) []*uploader.Target {
+	var targets []*uploader.Target
+
+	if cfg.RavenBrain.Enabled && cfg.RavenBrain.URL != "" {
+		if !uploader.IsSecureURL(cfg.RavenBrain.URL) {
+			slog.Warn("!!! INSECURE ravenbrain.url: credentials will NOT be sent — use https:// or http://localhost",
+				"url", cfg.RavenBrain.URL)
+		}
+		auth := uploader.NewAuth(cfg.RavenBrain.URL, cfg.RavenBrain.Username, cfg.RavenBrain.Password)
+		t, err := uploader.NewTarget(
+			"ravenbrain", auth,
+			cfg.RavenBrain.BatchSize,
+			time.Duration(cfg.RavenBrain.UploadInterval*float64(time.Second)),
+		)
+		if err != nil {
+			slog.Error("uploader: failed to build ravenbrain target", "err", err)
+		} else {
+			targets = append(targets, t)
+		}
+	}
+
+	if cfg.RavenScope.Enabled && cfg.RavenScope.URL != "" {
+		if !uploader.IsSecureURL(cfg.RavenScope.URL) {
+			slog.Warn("!!! INSECURE ravenscope.url: api key will NOT be sent — use https:// or http://localhost",
+				"url", cfg.RavenScope.URL)
+		}
+		auth := uploader.NewAuthWithKey(cfg.RavenScope.URL, cfg.RavenScope.APIKey)
+		t, err := uploader.NewTarget(
+			"ravenscope", auth,
+			cfg.RavenScope.BatchSize,
+			time.Duration(cfg.RavenScope.UploadInterval*float64(time.Second)),
+		)
+		if err != nil {
+			slog.Error("uploader: failed to build ravenscope target", "err", err)
+		} else {
+			targets = append(targets, t)
+		}
+	}
+
+	return targets
 }
 
 func stateName(s statemachine.State) string {

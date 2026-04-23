@@ -1,5 +1,9 @@
 bridge:
   team: 1310
+  # nt_host overrides the 10.TE.AM.2 robot address derivation. Leave empty for
+  # real-robot use. Set to "localhost" (or any host/IP) to point at a WPILib
+  # simulator or other non-RoboRIO NT4 server.
+  nt_host: ""
   obs_host: localhost
   obs_port: 4455
   obs_password: ""
@@ -24,13 +28,32 @@ telemetry:
   data_dir: ./data
   retention_days: 30
 
+# RavenBrain: team-hosted server using legacy /login → JWT.
+# A target is active only when enabled: true AND url is non-empty.
 ravenbrain:
+  enabled: true
   url: ""
   username: telemetry-agent
   password: ""
   batch_size: 50
   upload_interval: 10
 
+# RavenScope: Cloudflare Worker using a bearer API key (no /login).
+# Independent of ravenbrain — both can run in parallel, either alone, or neither.
+# Accepts http://localhost:* for local wrangler dev; otherwise https:// required.
+ravenscope:
+  enabled: false
+  url: ""                          # e.g. https://scope.your-domain.workers.dev
+  api_key: ""                      # rsk_live_…
+  batch_size: 50
+  upload_interval: 10
+
 dashboard:
   enabled: true
   port: 8080
+
+limelight:
+  enabled: true
+  last_octets: [11, 12]
+  poll_interval: 2.0
+  timeout_ms: 1000

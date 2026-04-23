@@ -1,6 +1,6 @@
 # RavenLink
 
-FRC robot data bridge for Team 1310. A single native binary that captures NetworkTables telemetry, controls OBS Studio recording, and forwards data to RavenBrain.
+FRC robot data bridge for Team 1310. A single native binary that captures NetworkTables telemetry, controls OBS Studio recording, and forwards data to RavenBrain and/or RavenScope — the two upload destinations run independently, so you can send to one, both, or neither (local-only mode).
 
 ## What It Does
 
@@ -9,10 +9,11 @@ Runs on the Driver Station laptop and:
 - **Captures all NetworkTables data** — subscribes to configurable path prefixes, logs every value change to JSONL files with timestamps
 - **Auto starts/stops OBS recording** — based on FMS match state (or manual/practice mode)
 - **Monitors Limelight uptime** — polls each camera's `/results` endpoint so you can distinguish "Limelight rebooted mid-match" from "we lost network to the Limelight" in post-match review
-- **Store-and-forward upload** — data saved locally first, uploaded to RavenBrain when internet is available (with idempotent retry and JWT auth)
-- **Web dashboard** at `http://localhost:8080` — live status, log viewer, session browser, config editor, restart/shutdown buttons
+- **Store-and-forward upload** — data saved locally first, then fanned out to every enabled destination (RavenBrain JWT, RavenScope bearer API key) with idempotent per-target retry. A file only moves out of `data/pending/` once every enabled target has accepted it; a down target doesn't hold up a healthy one.
+- **Web dashboard** at `http://localhost:8080` — live status (one row per upload target), log viewer, session browser, config editor, restart/shutdown buttons
 - **WPILog export** — convert any session to `.wpilog` and open directly in AdvantageScope from the dashboard
-- **Menu bar / system tray icon** — click for connection status, "Open Dashboard", "Quit". Menu rows use colored dots (🟢 live, 🟡 backlog, ⚪ idle) for NT, OBS, and RavenBrain
+- **Menu bar / system tray icon** — click for connection status, "Open Dashboard", "Quit". Menu shows one row per subsystem (NT, OBS) and one row per enabled upload target (RavenBrain, RavenScope) with per-target pending counts.
+- **Simulator friendly** — set `bridge.nt_host: localhost` to point at a WPILib simulator instead of the robot, and RavenLink treats `http://localhost` as a secure target so a local wrangler dev Worker "just works" for RavenScope testing.
 - **Auto-opens the dashboard** in your browser on launch (unless started in `--minimized` mode by autostart)
 - **First-run wizard** — ships with no team configured; on first launch the dashboard opens a config form, and saving restarts RavenLink with the new values automatically
 - **Launch on login** — registers itself so it starts when you boot the DS laptop
@@ -60,6 +61,7 @@ Example config (same format as `config.yaml.example`):
 ```yaml
 bridge:
   team: 1310
+  nt_host: ""                      # empty = derive 10.TE.AM.2 from team. Set "localhost" for WPILib sim.
   obs_host: localhost
   obs_port: 4455
   obs_password: ""
@@ -80,10 +82,21 @@ telemetry:
   data_dir: ./data
   retention_days: 30
 
+# RavenBrain (legacy /login JWT). Enable + set URL to activate.
 ravenbrain:
-  url: ""                          # empty = local-only mode (no upload)
+  enabled: true
+  url: ""                          # empty = disabled regardless of enabled flag
   username: telemetry-agent
   password: ""
+  batch_size: 50
+  upload_interval: 10
+
+# RavenScope (bearer API key). Enable + set URL + api_key to activate.
+# Independent of ravenbrain — both can run in parallel, either alone, or neither.
+ravenscope:
+  enabled: false
+  url: ""                          # e.g. https://scope.your-domain.workers.dev or http://localhost:8787 for sim
+  api_key: ""                      # rsk_live_… bearer token
   batch_size: 50
   upload_interval: 10
 
@@ -97,6 +110,41 @@ limelight:
   poll_interval: 2.0               # seconds between polls
   timeout_ms: 1000                 # per-request HTTP timeout
 ```
+
+### Upload Targets
+
+RavenLink ships to two independent destinations and each is its own config section. A target is "active" when `enabled: true` AND its `url` is non-empty. The dashboard rejects `enabled: true` with an empty URL at save time.
+
+| Target | Auth | Section | Works for |
+|---|---|---|---|
+| RavenBrain | Username/password → JWT (cached, auto-renewed 5 min before expiry) | `ravenbrain` | Team-hosted RavenBrain server |
+| RavenScope | Bearer API key (no `/login`, no cache) | `ravenscope` | Cloudflare Worker RavenScope instance |
+
+Both can run in parallel. Per-file completion is tracked on disk via `<base>.jsonl.<target>.done` sidecar markers; a file moves from `data/pending/` to `data/uploaded/` only after every enabled target has marked it done. A target that's temporarily unreachable backs off independently — the other target keeps delivering.
+
+Zero enabled targets = local-only mode: files stay in `data/pending/` and no network traffic happens.
+
+### Simulator / Local Dev
+
+For a WPILib simulator instead of a real robot:
+
+```yaml
+bridge:
+  nt_host: localhost             # overrides the 10.TE.AM.2 derivation
+```
+
+Or pass `--nt-host localhost` on the command line.
+
+For a local RavenScope Worker (e.g., `wrangler dev`):
+
+```yaml
+ravenscope:
+  enabled: true
+  url: http://localhost:8787
+  api_key: rsk_live_…
+```
+
+`http://` is normally refused to protect credentials, but loopback hosts (`localhost`, `127.x.x.x`, `::1`, `*.localhost`) are treated as secure — same rule browsers use for "secure contexts".
 
 Any setting can also be overridden by CLI flag — run `ravenlink --help` for the full list.
 
@@ -253,22 +301,47 @@ The state machine is pure logic with an injectable clock — 53 unit tests cover
 
 ### Store & Forward
 
-Completed JSONL files in `data/pending/` are uploaded to RavenBrain:
+Completed JSONL files in `data/pending/` are fanned out to every enabled upload target. Each target runs in its own goroutine on its own interval and has its own HTTP client, backoff timer, and status counters.
 
-1. `POST /login` → get JWT (cached, auto-renewed 5 min before expiry)
-2. `POST /api/telemetry/session` (idempotent — returns existing session if present)
-3. `GET /api/telemetry/session/{id}` (check server's `uploadedCount`)
-4. `POST /api/telemetry/session/{id}/data` (batches of 500, skips already-uploaded entries)
-5. `POST /api/telemetry/session/{id}/complete`
-6. File moves to `data/uploaded/` (pruned after `retention_days`)
+Per-target upload flow (identical protocol for RavenBrain and RavenScope):
 
-On 401: invalidate token, retry once. On network failure: exponential backoff (5s → 60s).
+1. Authenticate — RavenBrain: `POST /login` → JWT (cached, auto-renewed 5 min before expiry). RavenScope: `Authorization: Bearer <api_key>` directly, no `/login`.
+2. `POST /api/telemetry/session` (idempotent upsert — returns existing session if present)
+3. `GET /api/telemetry/session/{id}` → server's `uploadedCount` for resumption
+4. `POST /api/telemetry/session/{id}/data` in batches, skipping the prefix the server already has
+5. `POST /api/telemetry/session/{id}/complete` (idempotent on both servers)
+6. Write `<base>.jsonl.<target>.done` sidecar marker
+
+A file moves from `data/pending/` to `data/uploaded/` only after **every currently enabled target** has its marker. Targets that were enabled previously but are now disabled don't block the move — the uploader only checks markers for the active set. Zero targets enabled = local-only mode, files stay in `data/pending/`.
+
+On 401: invalidate auth, retry once. On network failure: per-target exponential backoff (5s → 60s). A slow or down target does not delay uploads to healthy targets. Server-side `uploadedCount` guarantees each target's re-attempts are idempotent — no duplicates, even across process restarts.
+
+### Auth Modes
+
+Each upload target owns exactly one auth shape:
+
+1. **Legacy username/password (RavenBrain `ravenbrain` section).** Set `ravenbrain.username` and `ravenbrain.password`. RavenLink calls `POST /login` to exchange them for a short-lived JWT and caches it (auto-renewed 5 minutes before expiry). 401 triggers an invalidate-and-retry.
+2. **API key bearer token (RavenScope `ravenscope` section).** Set `ravenscope.api_key` to an `rsk_live_…` token. RavenLink sends `Authorization: Bearer <api_key>` directly on every request — no `/login`, no cache, no renewal. The key itself is the credential.
+
+Both modes refuse to send credentials over plaintext HTTP **except** to loopback hosts (`localhost`, `127.x.x.x`, `::1`, `*.localhost`) so a local wrangler dev Worker or WPILib sim works out of the box. Anything non-loopback must be `https://`.
+
+Config via CLI:
+
+```bash
+./ravenlink \
+  --ravenbrain-url https://brain.team1310.ca \
+  --ravenscope-url https://scope.your-domain.workers.dev \
+  --ravenscope-api-key rsk_live_… \
+  --ravenscope-enabled
+```
+
+(Each target can be enabled/disabled independently; `--no-ravenbrain` turns the legacy target off.)
 
 ## Web Dashboard
 
 `http://localhost:8080` when the bridge is running:
 
-- **Status** — live connection status, match state, telemetry stats, collection state, upload progress
+- **Status** — live connection status (NT, OBS, plus one row per enabled upload target), match state, telemetry stats, collection state, per-target upload progress
 - **Logs** — recent slog output (auto-scrolling)
 - **Sessions** — browse all recorded session files (pending + uploaded), see match IDs for FMS matches, export to `.wpilog`, or open directly in AdvantageScope
 - **Config** — edit all settings, save to `config.yaml`, hot-reload for supported fields
@@ -292,9 +365,10 @@ On any of these, RavenLink performs a two-phase shutdown:
 - OBS recording is stopped if currently active
 
 **Phase 2 — drain pending uploads** *(up to 30 seconds)*
-- Uploader walks `data/pending/` and uploads every file (including the just-closed session) as fast as possible, ignoring the normal upload interval and backoff
-- If all files upload before the 30-second deadline, the process exits cleanly
-- If the deadline hits (slow WiFi, RavenBrain down), remaining files stay in `data/pending/` and are retried on the next startup
+- Uploader walks `data/pending/` sequentially and ships every file to every enabled target as fast as possible, ignoring the normal upload interval and per-target backoff
+- A file that gets its markers for all enabled targets moves to `data/uploaded/` immediately
+- If all files finalize before the 30-second deadline, the process exits cleanly
+- If the deadline hits (slow WiFi, a target is down), files that aren't fully marked stay in `data/pending/` with their partial markers. Next startup resumes — healthy targets skip files they already marked; the unhealthy target retries only what it owes.
 
 **Tolerance of ungraceful termination** — `SIGKILL`, power loss, crash:
 
@@ -328,10 +402,16 @@ On any of these, RavenLink performs a two-phase shutdown:
 - Check the last-octet list actually matches your installation. If you only have one camera at `.11`, set `last_octets: [11]`.
 
 **Data not uploading**
-- Check `ravenbrain.url` is set in config
-- Verify `username` and `password` for the `telemetry-agent` service account
-- Check dashboard upload status for error messages
-- Repeated 401s → password may have changed on the server
+- Check the dashboard Connections card. "Upload targets: None configured" means no target is both `enabled: true` AND has a non-empty `url`. Fix one or both sections.
+- Check `*.url` is either `https://` or `http://` to a loopback host (localhost, 127.x.x.x, ::1). Non-loopback `http://` is refused with a `WARN` log.
+- RavenBrain: verify `username` and `password` for the `telemetry-agent` service account. Repeated 401s → password changed on the server.
+- RavenScope: verify `api_key` is a valid `rsk_live_…` token and not expired/revoked.
+- Each target's dashboard row shows its own last error (HTTP status, connection error, auth error) — the other target may be fine while this one is failing.
+- If a file seems stuck in `data/pending/` and only one target is configured: check for a stray `.done` marker from a previously-enabled target. Startup sweeps orphan markers, but a marker written while that target was enabled persists; once its target is disabled, the finalize sweep moves the file on the next tick.
+
+**`rbping` diagnostic**
+- `rbping --target ravenbrain` — runs `/api/ping` → `/login` → `/api/validate` against the RavenBrain URL from config.
+- `rbping --target ravenscope` — runs `/api/health` → authenticated probe against the RavenScope URL. A 404 on the probe path is the expected success signal for auth.
 
 **Menu bar / system tray icon missing**
 - **macOS**: running the raw binary doesn't register with the Window Server. Build with `./scripts/build-macos.sh` and launch with `open dist/RavenLink.app`. The `.app` bundle sets `LSUIElement=true`, which makes RavenLink a menu-bar-only accessory (no Dock icon, no ⌘-Tab entry).
