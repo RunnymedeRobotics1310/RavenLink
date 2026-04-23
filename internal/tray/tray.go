@@ -23,10 +23,11 @@ type Tray struct {
 	currentColor string
 
 	// Menu items we need to update dynamically.
-	mStatus *systray.MenuItem
-	mNT     *systray.MenuItem
-	mOBS    *systray.MenuItem
-	mBrain  *systray.MenuItem
+	mStatus     *systray.MenuItem
+	mNT         *systray.MenuItem
+	mOBS        *systray.MenuItem
+	mRavenBrain *systray.MenuItem
+	mRavenScope *systray.MenuItem
 }
 
 // New creates a new Tray. dashboardURL is opened in the browser when
@@ -73,7 +74,13 @@ func (t *Tray) onReady() {
 	t.mStatus = systray.AddMenuItem("State: IDLE", "")
 	t.mNT = systray.AddMenuItem("NT: --", "")
 	t.mOBS = systray.AddMenuItem("OBS: --", "")
-	t.mBrain = systray.AddMenuItem("RavenBrain: --", "")
+	// Both upload targets get their own rows. UpdateStatus hides any
+	// target that isn't in status.UploadTargets on a given tick (i.e.
+	// disabled or unconfigured) so the menu only shows what's active.
+	t.mRavenBrain = systray.AddMenuItem("RavenBrain: --", "")
+	t.mRavenScope = systray.AddMenuItem("RavenScope: --", "")
+	t.mRavenBrain.Hide()
+	t.mRavenScope.Hide()
 
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Quit RavenLink")
@@ -89,7 +96,9 @@ func (t *Tray) onReady() {
 				// informational — no action
 			case <-t.mOBS.ClickedCh:
 				// informational — no action
-			case <-t.mBrain.ClickedCh:
+			case <-t.mRavenBrain.ClickedCh:
+				// informational — no action
+			case <-t.mRavenScope.ClickedCh:
 				// informational — no action
 			case <-mQuit.ClickedCh:
 				t.quitOnce.Do(func() {
@@ -114,9 +123,10 @@ func (t *Tray) UpdateStatus(st *status.Status) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	var ntConnected, obsConnected, obsRecording, brainConfigured bool
+	var ntConnected, obsConnected, obsRecording bool
 	var matchState string
-	var entriesWritten, filesPending int
+	var entriesWritten int
+	var targets []status.UploadTargetStatus
 
 	st.Snapshot(func(s *status.Status) {
 		ntConnected = s.NTConnected
@@ -124,15 +134,7 @@ func (t *Tray) UpdateStatus(st *status.Status) {
 		obsRecording = s.OBSRecording
 		matchState = s.MatchState
 		entriesWritten = s.EntriesWritten
-		// Aggregate placeholder until U6 gives each target its own menu
-		// item. Any reachable target → green; any pending file counts
-		// toward the shown total.
-		for _, t := range s.UploadTargets {
-			if t.Reachable {
-				brainConfigured = true
-			}
-			filesPending += t.FilesPending
-		}
+		targets = append(targets, s.UploadTargets...)
 	})
 
 	// Determine colour.
@@ -172,9 +174,36 @@ func (t *Tray) UpdateStatus(st *status.Status) {
 	if t.mOBS != nil {
 		t.mOBS.SetTitle(connLabel("OBS", obsConnected))
 	}
-	if t.mBrain != nil {
-		t.mBrain.SetTitle(brainLabel(brainConfigured, filesPending))
+	applyTargetMenu(t.mRavenBrain, "RavenBrain", findTarget(targets, "ravenbrain"))
+	applyTargetMenu(t.mRavenScope, "RavenScope", findTarget(targets, "ravenscope"))
+}
+
+// findTarget returns the first target whose Name matches (case-sensitive,
+// the name is the canonical lowercase identifier from the uploader), or
+// nil if not present in the current status snapshot.
+func findTarget(targets []status.UploadTargetStatus, name string) *status.UploadTargetStatus {
+	for i := range targets {
+		if targets[i].Name == name {
+			return &targets[i]
+		}
 	}
+	return nil
+}
+
+// applyTargetMenu updates or hides a target's menu item based on whether
+// it appears in the current status snapshot. A missing entry means the
+// target is disabled/unconfigured; we hide the row instead of showing a
+// stale "--" line.
+func applyTargetMenu(item *systray.MenuItem, displayName string, t *status.UploadTargetStatus) {
+	if item == nil {
+		return
+	}
+	if t == nil {
+		item.Hide()
+		return
+	}
+	item.SetTitle(targetLabel(displayName, t.Reachable, t.FilesPending))
+	item.Show()
 }
 
 // Stop tears down the system tray.
@@ -192,19 +221,19 @@ func connLabel(name string, connected bool) string {
 	return name + ": --"
 }
 
-// brainLabel is like connLabel but adds a "pending" state:
+// targetLabel renders a single upload target's status line:
 //
-//	not configured         → "RavenBrain: --"
-//	configured, backlog    → "RavenBrain: 3 pending"
-//	configured, caught up  → "RavenBrain: Connected"
-func brainLabel(configured bool, filesPending int) string {
-	if !configured {
-		return "RavenBrain: --"
+//	unreachable            → "<name>: --"
+//	reachable, backlog     → "<name>: 3 pending"
+//	reachable, caught up   → "<name>: Connected"
+func targetLabel(name string, reachable bool, filesPending int) string {
+	if !reachable {
+		return name + ": --"
 	}
 	if filesPending > 0 {
-		return fmt.Sprintf("RavenBrain: %d pending", filesPending)
+		return fmt.Sprintf("%s: %d pending", name, filesPending)
 	}
-	return "RavenBrain: Connected"
+	return name + ": Connected"
 }
 
 // openBrowser opens the given URL in the default browser.
