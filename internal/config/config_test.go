@@ -112,8 +112,8 @@ bridge:
 	if !cfg.Limelight.Enabled {
 		t.Error("Limelight.Enabled: got false, want default true")
 	}
-	if len(cfg.Limelight.LastOctets) != 2 || cfg.Limelight.LastOctets[0] != 11 || cfg.Limelight.LastOctets[1] != 12 {
-		t.Errorf("Limelight.LastOctets: got %v, want default [11 12]", cfg.Limelight.LastOctets)
+	if len(cfg.Limelight.LastOctets) != 1 || cfg.Limelight.LastOctets[0] != 11 {
+		t.Errorf("Limelight.LastOctets: got %v, want default [11]", cfg.Limelight.LastOctets)
 	}
 	if cfg.Limelight.PollInterval != 2.0 {
 		t.Errorf("Limelight.PollInterval: got %v, want default 2.0", cfg.Limelight.PollInterval)
@@ -304,7 +304,8 @@ func TestLoadMalformedYAML(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // TestRavenScopeSectionDefaultsWhenAbsent — a YAML without a ravenscope
-// section parses with the disabled default shape, not a zeroed struct.
+// section parses with the default shape (enabled, pointing at the team's
+// hosted RavenScope URL), not a zeroed struct.
 // ---------------------------------------------------------------------------
 
 func TestRavenScopeSectionDefaultsWhenAbsent(t *testing.T) {
@@ -323,8 +324,12 @@ ravenbrain:
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.RavenScope.Enabled {
-		t.Error("RavenScope.Enabled: want false (default) when section absent")
+	def := DefaultConfig().RavenScope
+	if cfg.RavenScope.Enabled != def.Enabled {
+		t.Errorf("RavenScope.Enabled: got %v, want default %v", cfg.RavenScope.Enabled, def.Enabled)
+	}
+	if cfg.RavenScope.URL != def.URL {
+		t.Errorf("RavenScope.URL: got %q, want default %q", cfg.RavenScope.URL, def.URL)
 	}
 	if cfg.RavenScope.BatchSize != 50 {
 		t.Errorf("RavenScope.BatchSize: got %d, want default 50", cfg.RavenScope.BatchSize)

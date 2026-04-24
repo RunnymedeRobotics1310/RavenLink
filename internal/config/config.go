@@ -124,7 +124,7 @@ func DefaultConfig() *Config {
 			RetentionDays: 30,
 		},
 		RavenBrain: RavenBrainConfig{
-			Enabled:        true,
+			Enabled:        false,
 			URL:            "",
 			Username:       "telemetry-agent",
 			Password:       "",
@@ -132,8 +132,8 @@ func DefaultConfig() *Config {
 			UploadInterval: 10,
 		},
 		RavenScope: RavenScopeConfig{
-			Enabled:        false,
-			URL:            "",
+			Enabled:        true,
+			URL:            "https://ravenscope.team1310.ca",
 			APIKey:         "",
 			BatchSize:      50,
 			UploadInterval: 10,
@@ -144,7 +144,7 @@ func DefaultConfig() *Config {
 		},
 		Limelight: LimelightConfig{
 			Enabled:      true,
-			LastOctets:   []int{11, 12},
+			LastOctets:   []int{11},
 			PollInterval: 2.0,
 			TimeoutMS:    1000,
 		},

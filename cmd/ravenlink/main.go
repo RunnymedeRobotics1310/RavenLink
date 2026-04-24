@@ -86,7 +86,7 @@ telemetry:
 # RavenBrain (team-hosted server, username/password → JWT).
 # Active only when enabled=true AND url is non-empty.
 ravenbrain:
-  enabled: true
+  enabled: false
   url: ""                       # https://brain.team1310.ca (or leave empty to disable)
   username: telemetry-agent
   password: ""
@@ -97,8 +97,8 @@ ravenbrain:
 # Independent of ravenbrain; either, both, or neither can run.
 # http://localhost:* is accepted for local wrangler dev; otherwise https:// required.
 ravenscope:
-  enabled: false
-  url: ""
+  enabled: true
+  url: "https://ravenscope.team1310.ca"
   api_key: ""                   # rsk_live_…
   batch_size: 50
   upload_interval: 10
@@ -109,7 +109,7 @@ dashboard:
 
 limelight:
   enabled: true                 # poll Limelight /results endpoint for uptime
-  last_octets: [11, 12]         # 10.TE.AM.<octet> for each camera
+  last_octets: [11]             # 10.TE.AM.<octet> for each camera
   poll_interval: 2.0            # seconds between polls per camera
   timeout_ms: 1000              # per-request HTTP timeout
 `
