@@ -87,7 +87,7 @@ telemetry:
 # Active only when enabled=true AND url is non-empty.
 ravenbrain:
   enabled: false
-  url: ""                       # https://brain.team1310.ca (or leave empty to disable)
+  url: ""                       # https://ravenbrain.team1310.ca (or leave empty to disable)
   username: telemetry-agent
   password: ""
   batch_size: 50

@@ -530,7 +530,7 @@ func TestIsSecureURL(t *testing.T) {
 		url  string
 		want bool
 	}{
-		{"https://brain.team1310.ca", true},
+		{"https://ravenbrain.team1310.ca", true},
 		{"https://localhost", true},
 		{"http://localhost", true},
 		{"http://localhost:8787", true},
