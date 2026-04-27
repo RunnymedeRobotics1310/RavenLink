@@ -22,6 +22,14 @@ ARCH="${1:-arm64}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Read the version from internal/version/version.go so Info.plist stays
+# in sync with the in-binary version constant. VERSION env var wins.
+VERSION="${VERSION:-$(grep -E '^const Version' internal/version/version.go | sed -E 's/.*"([^"]+)".*/\1/')}"
+if [[ -z "$VERSION" ]]; then
+  echo "Could not determine VERSION from internal/version/version.go" >&2
+  exit 1
+fi
+
 APP_NAME="RavenLink"
 APP_DIR="dist/${APP_NAME}.app"
 MACOS_DIR="${APP_DIR}/Contents/MacOS"
@@ -88,9 +96,9 @@ cat > "${APP_DIR}/Contents/Info.plist" <<EOF
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>0.1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleIconFile</key>
     <string>${APP_NAME}</string>
     <key>LSMinimumSystemVersion</key>

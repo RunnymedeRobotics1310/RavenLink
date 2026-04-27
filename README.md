@@ -91,9 +91,28 @@ That's it.
 Download the latest release for your platform from
 [GitHub Releases](https://github.com/RunnymedeRobotics1310/RavenLink/releases):
 
-- **Windows** — `ravenlink.exe`
-- **macOS** — `RavenLink.app` (drag to `/Applications`)
-- **Linux** — `ravenlink` binary
+- **Windows** — `RavenLink-<version>.exe`
+- **macOS** — `RavenLink-<version>.dmg` (mount, drag `RavenLink.app`
+  to `/Applications`, eject)
+- **Linux** — build from source
+
+### macOS — first launch (Gatekeeper)
+
+The DMG is **not signed with an Apple Developer certificate**, so
+macOS Gatekeeper will refuse to open `RavenLink.app` on the first
+launch with a "cannot be opened because the developer cannot be
+verified" dialog. This is expected; the binary is fine.
+
+To approve it, do **one** of the following — once is enough, macOS
+remembers the decision:
+
+- **Right-click → Open** on `RavenLink.app`, then click **Open** in
+  the dialog that appears, or
+- Open **System Settings → Privacy & Security**, scroll to the
+  message about RavenLink being blocked, and click **Open Anyway**.
+
+After that, double-clicking the app (or letting launch-on-login
+start it) works normally.
 
 Or build from source: see [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
