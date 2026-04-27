@@ -63,9 +63,6 @@ func writeTemplateConfig(path string) error {
 bridge:
   team: 0                       # REQUIRED: your FRC team number
   nt_host: ""                   # empty = derive 10.TE.AM.2 from team. "localhost" for WPILib sim.
-  obs_host: localhost
-  obs_port: 4455
-  obs_password: ""
   stop_delay: 10
   poll_interval: 0.05
   log_level: INFO
@@ -83,6 +80,16 @@ telemetry:
     - /Shuffleboard/
   data_dir: ./data
   retention_days: 30
+
+# OBS Studio recording integration (optional).
+# When disabled, RavenLink does not connect to OBS at all and the state
+# machine's start/stop-recording actions become no-ops. Useful on
+# Driver Station laptops that aren't running OBS.
+obs:
+  enabled: false
+  host: localhost
+  port: 4455
+  password: ""
 
 # RavenBrain (team-hosted server, username/password → JWT).
 # Active only when enabled=true AND url is non-empty.
@@ -226,10 +233,14 @@ func main() {
 			"config", filepath.Join(appDir, cfgPath),
 		)
 	} else {
+		obsLabel := "disabled"
+		if cfg.OBS.Enabled {
+			obsLabel = fmt.Sprintf("%s:%d", cfg.OBS.Host, cfg.OBS.Port)
+		}
 		slog.Info("Starting RavenLink",
 			"team", cfg.Bridge.Team,
 			"robot_ip", cfg.RobotIP(),
-			"obs", fmt.Sprintf("%s:%d", cfg.Bridge.OBSHost, cfg.Bridge.OBSPort),
+			"obs", obsLabel,
 			"record_trigger", cfg.Bridge.RecordTrigger,
 			"data_dir", cfg.Telemetry.DataDir,
 		)
@@ -303,13 +314,19 @@ func main() {
 		}
 		defer nt.Close()
 
-		// OBS client
-		obs = obsclient.New(cfg.Bridge.OBSHost, cfg.Bridge.OBSPort, cfg.Bridge.OBSPassword)
-		if err := obs.Connect(); err != nil {
-			slog.Warn("OBS connection failed — will retry", "err", err)
+		// OBS client. When OBS is disabled in config we leave `obs` nil;
+		// every later call site nil-checks first and treats nil as
+		// "OBS integration off" rather than "OBS unreachable".
+		if cfg.OBS.Enabled {
+			obs = obsclient.New(cfg.OBS.Host, cfg.OBS.Port, cfg.OBS.Password)
+			if err := obs.Connect(); err != nil {
+				slog.Warn("OBS connection failed — will retry", "err", err)
+			}
+			obs.StartHealthCheck(ctx)
+			defer obs.Close()
+		} else {
+			slog.Info("OBS integration disabled in config — skipping connection")
 		}
-		obs.StartHealthCheck(ctx)
-		defer obs.Close()
 
 		// State machine (OBS recording)
 		sm = statemachine.NewMachine(
@@ -603,10 +620,12 @@ func runMainLoop(
 	for {
 		select {
 		case <-ctx.Done():
-			// Stop recording on shutdown if active
-			if sm.State == statemachine.RecordingAuto ||
-				sm.State == statemachine.RecordingTeleop ||
-				sm.State == statemachine.StopPending {
+			// Stop recording on shutdown if active. obs may be nil when
+			// the OBS integration is disabled in config.
+			if obs != nil &&
+				(sm.State == statemachine.RecordingAuto ||
+					sm.State == statemachine.RecordingTeleop ||
+					sm.State == statemachine.StopPending) {
 				slog.Info("Stopping active recording before exit")
 				obs.StopRecording()
 			}
@@ -675,16 +694,21 @@ func runMainLoop(
 			}
 			prevState = sm.State
 
-			// Execute OBS actions
-			for _, action := range actions {
-				switch action {
-				case statemachine.StartRecord:
-					if !obs.StartRecording() {
-						slog.Error("Failed to start OBS recording")
-					}
-				case statemachine.StopRecord:
-					if !obs.StopRecording() {
-						slog.Error("Failed to stop OBS recording")
+			// Execute OBS actions. When OBS is disabled (obs == nil) the
+			// state machine still runs through its transitions (so match
+			// markers in the JSONL are emitted) but the start/stop calls
+			// become no-ops.
+			if obs != nil {
+				for _, action := range actions {
+					switch action {
+					case statemachine.StartRecord:
+						if !obs.StartRecording() {
+							slog.Error("Failed to start OBS recording")
+						}
+					case statemachine.StopRecord:
+						if !obs.StopRecording() {
+							slog.Error("Failed to stop OBS recording")
+						}
 					}
 				}
 			}
@@ -718,7 +742,8 @@ func runMainLoop(
 			}
 			st.Update(func(s *status.Status) {
 				s.NTConnected = nt.Connected()
-				s.OBSConnected = obs.IsConnected()
+				s.OBSEnabled = cfg.OBS.Enabled
+				s.OBSConnected = obs != nil && obs.IsConnected()
 				s.MatchState = stateName(sm.State)
 				s.ActiveSessionFile = stats.ActiveSessionID
 				s.EntriesWritten = stats.EntriesWritten

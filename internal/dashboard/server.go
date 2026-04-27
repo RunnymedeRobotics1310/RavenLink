@@ -41,6 +41,7 @@ const maskedPassword = "***"
 // fields that actually hot-reload.
 var restartRequiredFields = []string{
 	"team",
+	"obs_enabled",
 	"obs_host",
 	"obs_port",
 	"obs_password",
@@ -340,7 +341,7 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 
 	// Mask sensitive fields so passwords are never sent to the browser.
 	obsPwd := ""
-	if cfg.Bridge.OBSPassword != "" {
+	if cfg.OBS.Password != "" {
 		obsPwd = maskedPassword
 	}
 	rbPwd := ""
@@ -354,8 +355,9 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 
 	flat := map[string]any{
 		"team":                       cfg.Bridge.Team,
-		"obs_host":                   cfg.Bridge.OBSHost,
-		"obs_port":                   cfg.Bridge.OBSPort,
+		"obs_enabled":                cfg.OBS.Enabled,
+		"obs_host":                   cfg.OBS.Host,
+		"obs_port":                   cfg.OBS.Port,
 		"obs_password":               obsPwd,
 		"stop_delay":                 cfg.Bridge.StopDelay,
 		"poll_interval":              cfg.Bridge.PollInterval,
@@ -413,14 +415,16 @@ func (s *Server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 		switch key {
 		case "team":
 			cfg.Bridge.Team = toInt(val, cfg.Bridge.Team)
+		case "obs_enabled":
+			cfg.OBS.Enabled = toBool(val)
 		case "obs_host":
-			cfg.Bridge.OBSHost = val
+			cfg.OBS.Host = val
 		case "obs_port":
-			cfg.Bridge.OBSPort = toInt(val, cfg.Bridge.OBSPort)
+			cfg.OBS.Port = toInt(val, cfg.OBS.Port)
 		case "obs_password":
 			// Treat masked value as "leave unchanged".
 			if val != maskedPassword {
-				cfg.Bridge.OBSPassword = val
+				cfg.OBS.Password = val
 			}
 		case "stop_delay":
 			cfg.Bridge.StopDelay = toFloat(val, cfg.Bridge.StopDelay)

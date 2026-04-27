@@ -157,12 +157,13 @@ Everything else is stdlib: `net/http`, `encoding/json`, `log/slog`, `embed`, `co
 |---------|----------------|
 | `bridge` | log_level, stop_delay, poll_interval, auto_teleop_gap, nt_disconnect_grace, record_trigger, collect_trigger, launch_on_login |
 | `telemetry` | nt_paths, retention_days |
+| `obs` | — (restart required; enabled/host/port/password). When `enabled: false`, the OBS client is never constructed and start/stop-recording calls become no-ops. |
 | `ravenbrain` | — (restart required; enabled/url/username/password/batch_size/upload_interval) |
 | `ravenscope` | — (restart required; enabled/url/api_key/batch_size/upload_interval) |
 | `dashboard` | — (restart required) |
 | `limelight` | — (restart required; enabled/last_octets/poll_interval/timeout_ms) |
 
-Immutable fields (team, obs_host, obs_port) require a restart — dashboard shows a "restart required" indicator after edit.
+Immutable fields (team, obs.*) require a restart — dashboard shows a "restart required" indicator after edit.
 
 Both `ravenbrain` and `ravenscope` sections follow the same activation rule: the target is live only when `enabled: true` AND `url` is non-empty. Dashboard save rejects `enabled: true` with an empty URL at 400. A target left `enabled: true` while permanently unreachable will pile up files in `pending/` indefinitely — by design, we'd rather hold the data than silently drop it. Operators see the backlog in the dashboard's per-target `files_pending` counter and can disable the stuck target to drain.
 

@@ -148,7 +148,7 @@
 // RESTART_FIELDS is populated from GET /api/config (restart_required). Fallback
 // list covers every field except the two actual hot-reloadable ones.
 let RESTART_FIELDS = new Set([
-  'team','obs_host','obs_port','obs_password','stop_delay','poll_interval',
+  'team','obs_enabled','obs_host','obs_port','obs_password','stop_delay','poll_interval',
   'auto_teleop_gap','nt_disconnect_grace','nt_host','record_trigger','collect_trigger','nt_paths','data_dir',
   'retention_days',
   'ravenbrain_enabled','ravenbrain_url','ravenbrain_username','ravenbrain_password',
@@ -159,7 +159,8 @@ let RESTART_FIELDS = new Set([
   'limelight_enabled','limelight_last_octets','limelight_poll_interval','limelight_timeout_ms'
 ]);
 const FIELD_DESCS = {
-  team:'Team number',obs_host:'OBS host',obs_port:'OBS port',obs_password:'OBS password',
+  team:'Team number',
+  obs_enabled:'OBS integration enabled',obs_host:'OBS host',obs_port:'OBS port',obs_password:'OBS password',
   stop_delay:'Stop delay (s)',poll_interval:'Poll interval (s)',log_level:'Log level',
   auto_teleop_gap:'Auto-teleop gap (s)',nt_disconnect_grace:'NT disconnect grace (s)',nt_host:'NT host override (empty = use team-derived 10.TE.AM.2; "localhost" for sim)',
   record_trigger:'Record trigger',collect_trigger:'Collect trigger',launch_on_login:'Launch on login',nt_paths:'NT path prefixes',data_dir:'Data directory',
@@ -177,8 +178,9 @@ const FIELD_DESCS = {
 const TRIGGER_SELECTS = new Set(['record_trigger','collect_trigger']);
 const SENSITIVE = new Set(['obs_password','ravenbrain_password','ravenscope_api_key']);
 const MASKED = '***';
-const SECTIONS = {bridge:['team','nt_host','obs_host','obs_port','obs_password','stop_delay','poll_interval','log_level','auto_teleop_gap','nt_disconnect_grace','record_trigger','collect_trigger','launch_on_login'],
+const SECTIONS = {bridge:['team','nt_host','stop_delay','poll_interval','log_level','auto_teleop_gap','nt_disconnect_grace','record_trigger','collect_trigger','launch_on_login'],
   telemetry:['nt_paths','data_dir','retention_days'],
+  obs:['obs_enabled','obs_host','obs_port','obs_password'],
   ravenbrain:['ravenbrain_enabled','ravenbrain_url','ravenbrain_username','ravenbrain_password','ravenbrain_batch_size','ravenbrain_upload_interval'],
   ravenscope:['ravenscope_enabled','ravenscope_url','ravenscope_api_key','ravenscope_batch_size','ravenscope_upload_interval'],
   dashboard:['dashboard_enabled','dashboard_port'],
@@ -245,8 +247,19 @@ function updateStatus(d){
   document.getElementById('header-status').textContent=d.match_state+(d.obs_recording?' | REC':'');
   document.getElementById('s-nt').className='value '+connClass(d.nt_connected);
   document.getElementById('s-nt').textContent=connText(d.nt_connected);
-  document.getElementById('s-obs').className='value '+connClass(d.obs_connected);
-  document.getElementById('s-obs').textContent=connText(d.obs_connected);
+  // OBS row: if the integration is disabled in config, show "Disabled"
+  // (neutral grey) rather than the red "Disconnected" — the user
+  // intentionally turned it off; that isn't a failure state.
+  const obsEl=document.getElementById('s-obs');
+  if(d.obs_enabled===false){
+    obsEl.className='value';
+    obsEl.style.color='#94a3b8';
+    obsEl.textContent='Disabled';
+  } else {
+    obsEl.style.color='';
+    obsEl.className='value '+connClass(d.obs_connected);
+    obsEl.textContent=connText(d.obs_connected);
+  }
   renderTargets(d.upload_targets||[]);
   document.getElementById('s-state').textContent=d.match_state;
   document.getElementById('s-rec').className='value '+(d.obs_recording?'ok':'');

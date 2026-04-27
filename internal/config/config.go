@@ -5,7 +5,6 @@ package config
 import (
 	"flag"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -16,6 +15,7 @@ import (
 type Config struct {
 	Bridge     BridgeConfig     `yaml:"bridge"`
 	Telemetry  TelemetryConfig  `yaml:"telemetry"`
+	OBS        OBSConfig        `yaml:"obs"`
 	RavenBrain RavenBrainConfig `yaml:"ravenbrain"`
 	RavenScope RavenScopeConfig `yaml:"ravenscope"`
 	Dashboard  DashboardConfig  `yaml:"dashboard"`
@@ -27,12 +27,9 @@ type Config struct {
 	Minimized bool `yaml:"-"`
 }
 
-// BridgeConfig holds settings for the OBS/NT bridge core.
+// BridgeConfig holds settings for the NT bridge core.
 type BridgeConfig struct {
 	Team              int     `yaml:"team"`
-	OBSHost           string  `yaml:"obs_host"`
-	OBSPort           int     `yaml:"obs_port"`
-	OBSPassword       string  `yaml:"obs_password"`
 	StopDelay         float64 `yaml:"stop_delay"`
 	PollInterval      float64 `yaml:"poll_interval"`
 	LogLevel          string  `yaml:"log_level"`
@@ -55,6 +52,18 @@ type TelemetryConfig struct {
 	NTPaths       []string `yaml:"nt_paths"`
 	DataDir       string   `yaml:"data_dir"`
 	RetentionDays int      `yaml:"retention_days"`
+}
+
+// OBSConfig holds OBS Studio WebSocket settings. When Enabled is false,
+// RavenLink does not connect to OBS at all and the state machine's
+// StartRecord/StopRecord actions are no-ops. Use this on Driver Station
+// laptops that aren't running OBS so the dashboard doesn't perpetually
+// show "OBS: Disconnected".
+type OBSConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	Password string `yaml:"password"`
 }
 
 // RavenBrainConfig holds settings for the RavenBrain upload target.
@@ -106,9 +115,6 @@ func DefaultConfig() *Config {
 	return &Config{
 		Bridge: BridgeConfig{
 			Team:              1310,
-			OBSHost:           "localhost",
-			OBSPort:           4455,
-			OBSPassword:       "",
 			StopDelay:         10,
 			PollInterval:      0.05,
 			LogLevel:          "INFO",
@@ -122,6 +128,12 @@ func DefaultConfig() *Config {
 			NTPaths:       []string{"/FMSInfo/", "/SmartDashboard/", "/Shuffleboard/"},
 			DataDir:       "./data",
 			RetentionDays: 30,
+		},
+		OBS: OBSConfig{
+			Enabled:  false,
+			Host:     "localhost",
+			Port:     4455,
+			Password: "",
 		},
 		RavenBrain: RavenBrainConfig{
 			Enabled:        false,
@@ -152,27 +164,11 @@ func DefaultConfig() *Config {
 }
 
 // LoadConfig reads a YAML config file at path and returns a Config.
-// Missing fields are filled from DefaultConfig.
-//
-// Before the typed unmarshal, LoadConfig runs a raw-YAML pre-pass to
-// migrate configs from the earlier feat/ravenscope-bearer-auth branch
-// shape — where an `api_key` field lived inside the `ravenbrain` section
-// — into the split-section shape. If `ravenbrain.api_key` is set and no
-// `ravenscope` section exists, the pre-pass synthesizes a `ravenscope`
-// block (enabled: true, same URL, migrated api_key) and strips the key
-// from `ravenbrain`. The migration is logged at INFO; the user-facing
-// consequence is that YAML comments and key ordering are lost when the
-// in-memory config is next saved, which is acceptable given SaveConfig
-// rewrites the whole file on every save anyway.
+// Fields absent from the YAML keep the values from DefaultConfig().
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config file: %w", err)
-	}
-
-	data, err = migrateLegacyAPIKey(data)
-	if err != nil {
-		return nil, fmt.Errorf("migrating legacy config: %w", err)
 	}
 
 	cfg := DefaultConfig()
@@ -180,103 +176,7 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config YAML: %w", err)
 	}
 
-	// Backfill fields missing from older config files.
-	if cfg.Bridge.CollectTrigger == "" {
-		cfg.Bridge.CollectTrigger = "fms"
-	}
-	// Limelight section was added later; a config predating it parses
-	// with the zero values for LimelightConfig. Zero-valued PollInterval
-	// and TimeoutMS are unusable, so treat them as the sentinel for
-	// "section absent" and re-apply defaults.
-	if cfg.Limelight.PollInterval == 0 && cfg.Limelight.TimeoutMS == 0 && cfg.Limelight.LastOctets == nil {
-		def := DefaultConfig().Limelight
-		cfg.Limelight = def
-	}
-	// RavenScope section was added later. Zero-valued BatchSize and
-	// UploadInterval with an empty URL/APIKey is the signal that the
-	// section was absent from the YAML. Restore defaults so the struct
-	// doesn't carry nonsense values.
-	if cfg.RavenScope.BatchSize == 0 && cfg.RavenScope.UploadInterval == 0 &&
-		cfg.RavenScope.URL == "" && cfg.RavenScope.APIKey == "" {
-		cfg.RavenScope = DefaultConfig().RavenScope
-	}
-	// RavenBrain batch/interval defaults for very old configs that never
-	// set them explicitly.
-	if cfg.RavenBrain.BatchSize == 0 {
-		cfg.RavenBrain.BatchSize = DefaultConfig().RavenBrain.BatchSize
-	}
-	if cfg.RavenBrain.UploadInterval == 0 {
-		cfg.RavenBrain.UploadInterval = DefaultConfig().RavenBrain.UploadInterval
-	}
-
 	return cfg, nil
-}
-
-// migrateLegacyAPIKey rewrites legacy `ravenbrain.api_key` into a
-// synthesized top-level `ravenscope:` section, then returns the
-// re-marshaled YAML bytes. Input that does not match the legacy shape is
-// returned unchanged.
-//
-// Legacy shape (feat/ravenscope-bearer-auth commit a34d5f4): a single
-// `ravenbrain:` section carried both legacy username/password and the
-// new `api_key` field. The rewrite:
-//
-//  1. If `ravenbrain.api_key` is absent or empty → no-op.
-//  2. If a top-level `ravenscope:` key already exists → honor the user's
-//     explicit block, just strip `ravenbrain.api_key`.
-//  3. Otherwise synthesize
-//     `ravenscope: {enabled: true, url: <ravenbrain.url>, api_key: <val>}`
-//     and strip `ravenbrain.api_key`.
-func migrateLegacyAPIKey(data []byte) ([]byte, error) {
-	var root map[string]any
-	if err := yaml.Unmarshal(data, &root); err != nil {
-		// Let the typed unmarshal surface the real parse error.
-		return data, nil
-	}
-	if root == nil {
-		return data, nil
-	}
-
-	brainRaw, ok := root["ravenbrain"]
-	if !ok {
-		return data, nil
-	}
-	brain, ok := brainRaw.(map[string]any)
-	if !ok {
-		return data, nil
-	}
-
-	apiKeyRaw, hasKey := brain["api_key"]
-	if !hasKey {
-		return data, nil
-	}
-	apiKey, _ := apiKeyRaw.(string)
-
-	// Always strip the legacy field from ravenbrain.
-	delete(brain, "api_key")
-	root["ravenbrain"] = brain
-
-	// If an explicit ravenscope section already exists, the user has
-	// already migrated by hand — don't clobber it.
-	if _, explicit := root["ravenscope"]; !explicit && apiKey != "" {
-		brainURL, _ := brain["url"].(string)
-		root["ravenscope"] = map[string]any{
-			"enabled": true,
-			"url":     brainURL,
-			"api_key": apiKey,
-		}
-		slog.Info("config: migrated ravenbrain.api_key -> ravenscope.api_key (YAML comments and key order in config.yaml will be lost on next save)")
-	} else if apiKey != "" {
-		slog.Info("config: stripped legacy ravenbrain.api_key (explicit ravenscope section already present)")
-	} else {
-		// api_key was present but empty; silent cleanup.
-	}
-
-	out, err := yaml.Marshal(root)
-	if err != nil {
-		return nil, fmt.Errorf("remarshaling migrated config: %w", err)
-	}
-	return out, nil
 }
 
 // SaveConfig writes the config to the given YAML file path atomically
@@ -381,9 +281,11 @@ func ParseFlags(cfg *Config) {
 
 	// Bridge flags
 	team := fs.Int("team", cfg.Bridge.Team, "Team number (used to derive robot IP 10.TE.AM.2)")
-	obsHost := fs.String("obs-host", cfg.Bridge.OBSHost, "OBS WebSocket host")
-	obsPort := fs.Int("obs-port", cfg.Bridge.OBSPort, "OBS WebSocket port")
-	obsPassword := fs.String("obs-password", cfg.Bridge.OBSPassword, "OBS WebSocket password")
+	obsEnabled := fs.Bool("obs-enabled", cfg.OBS.Enabled, "Enable the OBS recording integration")
+	noOBS := fs.Bool("no-obs", false, "Disable the OBS recording integration")
+	obsHost := fs.String("obs-host", cfg.OBS.Host, "OBS WebSocket host")
+	obsPort := fs.Int("obs-port", cfg.OBS.Port, "OBS WebSocket port")
+	obsPassword := fs.String("obs-password", cfg.OBS.Password, "OBS WebSocket password")
 	stopDelay := fs.Float64("stop-delay", cfg.Bridge.StopDelay, "Seconds after match end before stopping recording")
 	pollInterval := fs.Float64("poll-interval", cfg.Bridge.PollInterval, "Poll interval in seconds")
 	logLevel := fs.String("log-level", cfg.Bridge.LogLevel, "Log level (DEBUG, INFO, WARNING, ERROR)")
@@ -405,10 +307,6 @@ func ParseFlags(cfg *Config) {
 	ravenbrainBatchSize := fs.Int("ravenbrain-batch-size", cfg.RavenBrain.BatchSize, "RavenBrain upload batch size")
 	ravenbrainUploadInterval := fs.Float64("ravenbrain-upload-interval", cfg.RavenBrain.UploadInterval, "RavenBrain upload interval in seconds")
 	noRavenBrain := fs.Bool("no-ravenbrain", false, "Disable the RavenBrain upload target")
-
-	// Deprecated alias: --ravenbrain-api-key routes into the RavenScope
-	// section. Remove once the bearer-auth branch has been rolled out.
-	deprecatedAPIKey := fs.String("ravenbrain-api-key", "", "Deprecated: use --ravenscope-api-key (routes to ravenscope for now)")
 
 	// RavenScope flags
 	ravenscopeURL := fs.String("ravenscope-url", cfg.RavenScope.URL, "RavenScope server URL")
@@ -436,9 +334,13 @@ func ParseFlags(cfg *Config) {
 
 	// Apply overrides.
 	cfg.Bridge.Team = *team
-	cfg.Bridge.OBSHost = *obsHost
-	cfg.Bridge.OBSPort = *obsPort
-	cfg.Bridge.OBSPassword = *obsPassword
+	cfg.OBS.Enabled = *obsEnabled
+	if *noOBS {
+		cfg.OBS.Enabled = false
+	}
+	cfg.OBS.Host = *obsHost
+	cfg.OBS.Port = *obsPort
+	cfg.OBS.Password = *obsPassword
 	cfg.Bridge.StopDelay = *stopDelay
 	cfg.Bridge.PollInterval = *pollInterval
 	cfg.Bridge.LogLevel = *logLevel
@@ -469,15 +371,6 @@ func ParseFlags(cfg *Config) {
 	cfg.RavenScope.BatchSize = *ravenscopeBatchSize
 	cfg.RavenScope.UploadInterval = *ravenscopeUploadInterval
 	cfg.RavenScope.Enabled = *ravenscopeEnabled
-
-	if *deprecatedAPIKey != "" {
-		slog.Warn("--ravenbrain-api-key is deprecated; use --ravenscope-api-key. Value routed to ravenscope.api_key.")
-		cfg.RavenScope.APIKey = *deprecatedAPIKey
-		if cfg.RavenScope.URL == "" {
-			cfg.RavenScope.URL = cfg.RavenBrain.URL
-		}
-		cfg.RavenScope.Enabled = true
-	}
 
 	cfg.Dashboard.Port = *dashboardPort
 	if *noDashboard {

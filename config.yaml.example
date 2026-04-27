@@ -4,9 +4,6 @@ bridge:
   # real-robot use. Set to "localhost" (or any host/IP) to point at a WPILib
   # simulator or other non-RoboRIO NT4 server.
   nt_host: ""
-  obs_host: localhost
-  obs_port: 4455
-  obs_password: ""
   stop_delay: 10
   poll_interval: 0.05
   log_level: INFO
@@ -15,6 +12,14 @@ bridge:
   auto_teleop_gap: 5
   nt_disconnect_grace: 15
   launch_on_login: true
+
+# OBS Studio recording integration. When enabled is false, RavenLink does
+# not connect to OBS at all and start/stop-recording becomes a no-op.
+obs:
+  enabled: false
+  host: localhost
+  port: 4455
+  password: ""
 
 telemetry:
   nt_paths:

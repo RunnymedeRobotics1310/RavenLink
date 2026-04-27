@@ -134,15 +134,23 @@ func (u *Uploader) runTargetLoop(ctx context.Context, t *Target) {
 }
 
 // maybeUploadForTarget runs one upload attempt for a single target.
-// Layout: finalize-ready sweep → pause check → list owing files → pick
-// oldest → if in backoff skip (but still update pending count) →
-// attempt one file. Each tick processes at most one file per target so
-// logs stay readable.
+// Layout: ping for reachability → finalize-ready sweep → pause check →
+// list owing files → pick oldest → if in backoff skip (but still update
+// pending count) → attempt one file. Each tick processes at most one
+// file per target so logs stay readable.
+//
+// Reachability is probed unconditionally (when configured) so the
+// dashboard reflects raw network connectivity. Upload-protocol failures
+// (auth rejects, 5xx, etc.) surface in LastResult and trigger backoff
+// but do NOT flip reachable to false — a server that returns 401 is
+// still reachable.
 func (u *Uploader) maybeUploadForTarget(t *Target, activeSessionID string) {
 	if !t.IsConfigured() {
 		t.setReachable(false)
 		return
 	}
+	t.setReachable(t.ping())
+
 	if u.pausedFn != nil && u.pausedFn() {
 		return
 	}
@@ -156,7 +164,6 @@ func (u *Uploader) maybeUploadForTarget(t *Target, activeSessionID string) {
 	t.setFilesPending(len(owing))
 
 	if len(owing) == 0 {
-		t.setReachable(t.ping())
 		return
 	}
 	if t.inBackoff() {
@@ -169,13 +176,11 @@ func (u *Uploader) maybeUploadForTarget(t *Target, activeSessionID string) {
 
 	ok, err := t.uploadFile(fpath)
 	if err != nil {
-		t.setReachable(false)
 		slog.Warn("uploader: upload failed", "target", t.name, "file", shortName(fpath), "err", err)
 		t.setLastResult("ERROR: " + err.Error())
 		t.applyBackoff()
 		return
 	}
-	t.setReachable(true)
 	if !ok {
 		t.applyBackoff()
 		return

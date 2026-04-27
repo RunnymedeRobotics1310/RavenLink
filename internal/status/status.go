@@ -18,6 +18,7 @@ type Status struct {
 	// Connections
 	NTConnected  bool `json:"nt_connected"`
 	OBSConnected bool `json:"obs_connected"`
+	OBSEnabled   bool `json:"obs_enabled"`
 
 	// State machine
 	MatchState string `json:"match_state"`

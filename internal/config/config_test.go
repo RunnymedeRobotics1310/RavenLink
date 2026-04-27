@@ -31,9 +31,10 @@ func TestRoundTrip(t *testing.T) {
 
 	orig := DefaultConfig()
 	orig.Bridge.Team = 4646
-	orig.Bridge.OBSHost = "testhost"
-	orig.Bridge.OBSPort = 9999
-	orig.Bridge.OBSPassword = "secret"
+	orig.OBS.Enabled = true
+	orig.OBS.Host = "testhost"
+	orig.OBS.Port = 9999
+	orig.OBS.Password = "secret"
 	orig.Bridge.StopDelay = 7.5
 	orig.Bridge.LogLevel = "DEBUG"
 	orig.Telemetry.DataDir = "/tmp/nope"
@@ -70,12 +71,13 @@ func TestDefaultMerge(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "partial.yaml")
 
-	// Only set a couple of bridge fields. Everything else should come from
+	// Set a bridge field and an obs field. Everything else should come from
 	// DefaultConfig.
 	writeFile(t, path, `
 bridge:
   team: 254
-  obs_host: roborio
+obs:
+  host: roborio
 `)
 
 	cfg, err := LoadConfig(path)
@@ -86,12 +88,16 @@ bridge:
 	if cfg.Bridge.Team != 254 {
 		t.Errorf("Team: got %d, want 254", cfg.Bridge.Team)
 	}
-	if cfg.Bridge.OBSHost != "roborio" {
-		t.Errorf("OBSHost: got %q, want %q", cfg.Bridge.OBSHost, "roborio")
+	if cfg.OBS.Host != "roborio" {
+		t.Errorf("OBS.Host: got %q, want %q", cfg.OBS.Host, "roborio")
 	}
-	// Default OBSPort is 4455.
-	if cfg.Bridge.OBSPort != 4455 {
-		t.Errorf("OBSPort: got %d, want default 4455", cfg.Bridge.OBSPort)
+	// Default OBS.Port is 4455.
+	if cfg.OBS.Port != 4455 {
+		t.Errorf("OBS.Port: got %d, want default 4455", cfg.OBS.Port)
+	}
+	// Default OBS.Enabled is false.
+	if cfg.OBS.Enabled {
+		t.Error("OBS.Enabled: got true, want default false")
 	}
 	// Default log level.
 	if cfg.Bridge.LogLevel != "INFO" {
@@ -379,112 +385,6 @@ ravenscope:
 	// RavenBrain left at defaults; not clobbered.
 	if cfg.RavenBrain.Username != "telemetry-agent" {
 		t.Errorf("RavenBrain.Username should stay at default when only ravenscope is set; got %q", cfg.RavenBrain.Username)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// TestLegacyAPIKeyMigration — a YAML written by the feat/ravenscope-bearer-auth
-// branch (ravenbrain.api_key set, no ravenscope section) migrates into the
-// split-section shape on load.
-// ---------------------------------------------------------------------------
-
-func TestLegacyAPIKeyMigration(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "legacy.yaml")
-	writeFile(t, path, `
-bridge:
-  team: 1310
-ravenbrain:
-  url: https://scope.example
-  username: telemetry-agent
-  password: hunter2
-  api_key: sk-legacy-key
-  batch_size: 50
-  upload_interval: 10
-`)
-	cfg, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if cfg.RavenScope.APIKey != "sk-legacy-key" {
-		t.Errorf("RavenScope.APIKey: got %q, want migrated value", cfg.RavenScope.APIKey)
-	}
-	if cfg.RavenScope.URL != "https://scope.example" {
-		t.Errorf("RavenScope.URL: got %q, want URL copied from legacy ravenbrain.url", cfg.RavenScope.URL)
-	}
-	if !cfg.RavenScope.Enabled {
-		t.Error("RavenScope.Enabled: want true after migration")
-	}
-	// RavenBrain username/password preserved.
-	if cfg.RavenBrain.Username != "telemetry-agent" {
-		t.Errorf("RavenBrain.Username: got %q", cfg.RavenBrain.Username)
-	}
-	if cfg.RavenBrain.Password != "hunter2" {
-		t.Errorf("RavenBrain.Password: got %q", cfg.RavenBrain.Password)
-	}
-	// RavenBrain URL preserved too — the legacy user pointed both at the
-	// same URL; we don't assume otherwise.
-	if cfg.RavenBrain.URL != "https://scope.example" {
-		t.Errorf("RavenBrain.URL: got %q", cfg.RavenBrain.URL)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// TestLegacyAPIKeyMigrationRespectsExplicitScope — when a YAML has both
-// legacy ravenbrain.api_key AND an explicit ravenscope section, the
-// explicit section wins; migration only strips the stray api_key.
-// ---------------------------------------------------------------------------
-
-func TestLegacyAPIKeyMigrationRespectsExplicitScope(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "both.yaml")
-	writeFile(t, path, `
-bridge:
-  team: 1310
-ravenbrain:
-  url: https://brain.example
-  api_key: sk-should-be-ignored
-ravenscope:
-  enabled: true
-  url: https://scope.example
-  api_key: sk-explicit
-`)
-	cfg, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if cfg.RavenScope.APIKey != "sk-explicit" {
-		t.Errorf("explicit ravenscope section should win; got %q", cfg.RavenScope.APIKey)
-	}
-	if cfg.RavenScope.URL != "https://scope.example" {
-		t.Errorf("explicit URL should win; got %q", cfg.RavenScope.URL)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// TestDeprecatedAPIKeyFlag — --ravenbrain-api-key still routes into the
-// new ravenscope section as a deprecated alias.
-// ---------------------------------------------------------------------------
-
-func TestDeprecatedAPIKeyFlag(t *testing.T) {
-	origArgs := os.Args
-	t.Cleanup(func() { os.Args = origArgs })
-
-	os.Args = []string{"ravenlink",
-		"--ravenbrain-url=https://brain.example",
-		"--ravenbrain-api-key=sk-alias-routed",
-	}
-	cfg := DefaultConfig()
-	ParseFlags(cfg)
-
-	if cfg.RavenScope.APIKey != "sk-alias-routed" {
-		t.Errorf("--ravenbrain-api-key should route to ravenscope.api_key; got %q", cfg.RavenScope.APIKey)
-	}
-	if !cfg.RavenScope.Enabled {
-		t.Error("deprecated alias should enable ravenscope")
-	}
-	if cfg.RavenScope.URL == "" {
-		t.Error("deprecated alias should backfill ravenscope.url from ravenbrain.url when unset")
 	}
 }
 
