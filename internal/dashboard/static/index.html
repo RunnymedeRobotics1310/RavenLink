@@ -316,6 +316,12 @@ function loadConfig(){
       const div=document.createElement('div');
       div.className='config-section';
       div.innerHTML='<h3>'+section+'</h3>';
+      // Sections that have a `<section>_enabled` toggle hide the rest of
+      // their fields when disabled. Track the toggle name + the dependent
+      // field rows so a single change handler can flip them as a group.
+      const toggleName=section+'_enabled';
+      const hasToggle=fields.includes(toggleName);
+      const dependentRows=[];
       for(const f of fields){
         const val=cfg[f];
         const fd=document.createElement('div');
@@ -324,10 +330,17 @@ function loadConfig(){
         lb.textContent=FIELD_DESCS[f]||f;
         fd.appendChild(lb);
         if(typeof val==='boolean'){
-          const sel=document.createElement('select');
-          sel.name=f;
-          sel.innerHTML='<option value="true"'+(val?' selected':'')+'>true</option><option value="false"'+(!val?' selected':'')+'>false</option>';
-          fd.appendChild(sel);
+          const cb=document.createElement('input');
+          cb.type='checkbox';
+          cb.name=f;
+          cb.checked=val;
+          // Checkboxes look better left-aligned inside the value column;
+          // override the field grid's stretch behaviour.
+          cb.style.justifySelf='start';
+          fd.appendChild(cb);
+          if(hasToggle && f===toggleName){
+            cb.addEventListener('change',()=>applySectionVisibility(cb.checked,dependentRows));
+          }
         }else if(TRIGGER_SELECTS.has(f)){
           const sel=document.createElement('select');
           sel.name=f;
@@ -358,10 +371,25 @@ function loadConfig(){
           fd.appendChild(inp);
         }
         div.appendChild(fd);
+        if(hasToggle && f!==toggleName){
+          dependentRows.push(fd);
+        }
       }
       form.appendChild(div);
+      if(hasToggle){
+        applySectionVisibility(cfg[toggleName],dependentRows);
+      }
     }
   });
+}
+
+// applySectionVisibility hides or shows the dependent field rows of a
+// section based on its `<section>_enabled` checkbox. Used both at
+// initial render and on every change of the toggle.
+function applySectionVisibility(enabled,rows){
+  for(const row of rows){
+    row.classList.toggle('hidden',!enabled);
+  }
 }
 
 document.getElementById('btn-save').addEventListener('click',(ev)=>{
@@ -371,7 +399,11 @@ document.getElementById('btn-save').addEventListener('click',(ev)=>{
   form.querySelectorAll('input,select').forEach(el=>{
     // Leave sensitive fields unchanged unless the user typed something.
     if(SENSITIVE.has(el.name)&&el.value==='')return;
-    data[el.name]=el.value;
+    if(el.type==='checkbox'){
+      data[el.name]=el.checked;
+    }else{
+      data[el.name]=el.value;
+    }
   });
   const saveBanner=document.getElementById('config-save-banner');
   const warnBanner=document.getElementById('config-banner');

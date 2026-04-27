@@ -182,20 +182,30 @@ func (t *Target) incFilesUploaded() {
 	t.filesUploaded++
 }
 
-// ping issues a HEAD against the target's base URL. Any HTTP response
-// counts as reachable; only connection/timeout errors return false.
+// ping issues a GET against the target's base URL. Any HTTP response
+// counts as reachable; only connection/timeout/TLS errors return false.
+//
+// GET (rather than HEAD) is used because some edges — notably
+// Cloudflare Workers without an explicit HEAD branch — handle HEAD
+// inconsistently, and a body-discarding GET is just as cheap for a
+// liveness probe. Transport errors are logged at DEBUG so an operator
+// running RavenLink with `--log-level=DEBUG` can see why a target is
+// being marked Disconnected.
 func (t *Target) ping() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, t.auth.BaseURL(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.auth.BaseURL(), nil)
 	if err != nil {
+		slog.Debug("uploader: ping: bad request", "target", t.name, "err", err)
 		return false
 	}
 	resp, err := t.httpClient.Do(req)
 	if err != nil {
+		slog.Debug("uploader: ping: transport error", "target", t.name, "url", t.auth.BaseURL(), "err", err)
 		return false
 	}
+	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	return true
 }
