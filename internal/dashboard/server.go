@@ -25,6 +25,7 @@ import (
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/collect"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/config"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/status"
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/version"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/wpilog"
 )
 
@@ -151,6 +152,7 @@ func (s *Server) Start(ctx context.Context, port int) {
 	mux.Handle("GET /", http.FileServer(http.FS(staticContent)))
 
 	mux.HandleFunc("GET /logo.png", s.handleLogo)
+	mux.HandleFunc("GET /api/version", s.handleVersion)
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	mux.HandleFunc("GET /api/config", s.handleConfigGet)
@@ -253,6 +255,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(data)
+}
+
+// handleVersion returns the build version string the UI footer renders.
+// Cacheable for a day — the value only changes across binary rebuilds,
+// and a config-save restart drops the page anyway.
+func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = fmt.Fprintf(w, `{"version":%q}`, version.Version)
 }
 
 // handleLogo serves the embedded team logo so the dashboard header

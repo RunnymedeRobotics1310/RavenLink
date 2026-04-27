@@ -31,6 +31,7 @@ import (
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/tray"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/typeconv"
 	"github.com/RunnymedeRobotics1310/RavenLink/internal/uploader"
+	"github.com/RunnymedeRobotics1310/RavenLink/internal/version"
 )
 
 // openLogFile creates/appends to the OS-standard log file. Returns
@@ -116,12 +117,22 @@ limelight:
 	return os.WriteFile(path, []byte(tmpl), 0o600)
 }
 
-const Banner = `
-╔══════════════════════════════════════╗
-║        RavenLink v0.1.0             ║
-║   FRC Robot Data Bridge for 1310    ║
-╚══════════════════════════════════════╝
-`
+// Banner is rendered at startup. The version line is built at init
+// time from internal/version.Version so there is one source of truth.
+var Banner = "\n" +
+	"╔══════════════════════════════════════╗\n" +
+	"║        RavenLink v" + padRight(version.Version, 18) + "║\n" +
+	"║   FRC Robot Data Bridge for 1310     ║\n" +
+	"╚══════════════════════════════════════╝\n"
+
+// padRight pads s with spaces to width n. Used only by Banner so the
+// box edges line up regardless of version-string length.
+func padRight(s string, n int) string {
+	if len(s) >= n {
+		return s
+	}
+	return s + strings.Repeat(" ", n-len(s))
+}
 
 func main() {
 	// Resolve and chdir to the app directory so config.yaml and data/

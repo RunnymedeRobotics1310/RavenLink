@@ -64,6 +64,7 @@
   .btn-sm:hover { background: #334155; }
   .btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
   .empty-state { text-align: center; color: #64748b; padding: 48px 24px; }
+  .footer { text-align: center; color: #64748b; font-size: 11px; padding: 24px 16px 12px; }
 </style>
 </head>
 <body>
@@ -142,6 +143,7 @@
     </div>
   </div>
 </div>
+<div class="footer">RavenLink <span id="app-version">…</span> · Team 1310</div>
 <script>
 // RESTART_FIELDS is populated from GET /api/config (restart_required). Fallback
 // list covers every field except the two actual hot-reloadable ones.
@@ -512,6 +514,13 @@ function startStatusStream(){
 startStatusStream();
 // Seed the initial render immediately so there's no empty flash.
 fetch('/api/status').then(r=>r.json()).then(updateStatus).catch(()=>{});
+
+// Footer version: fetched once at load. /api/version is heavily cached;
+// a config-save restart drops the page so the next load picks up the
+// new value automatically.
+fetch('/api/version').then(r=>r.json()).then(v=>{
+  if(v && v.version){ document.getElementById('app-version').textContent='v'+v.version; }
+}).catch(()=>{ document.getElementById('app-version').textContent=''; });
 
 // First-run detection: if team===0, show the banner and auto-switch
 // to the config tab. Also honor window.location.hash = #config.
