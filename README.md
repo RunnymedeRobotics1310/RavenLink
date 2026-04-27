@@ -47,6 +47,37 @@ streaming match data with no other setup.
 Built in Go. Single ~14 MB static binary. No runtime dependencies
 (no Python, no .NET, no JVM).
 
+## Interface
+
+The browser dashboard at `http://localhost:8080` is the primary
+control surface — live status, log viewer, session browser, and
+config editor, all in one tab-driven UI. It auto-opens on launch
+and is also reachable from the system tray icon.
+
+![RavenLink status dashboard](docs/assets/1-RavenLink-Status.png)
+
+### Sessions tab — works without internet
+
+![RavenLink session list](docs/assets/2-RavenLink-Sessions.png)
+
+Every recorded session is listed here with row-level actions:
+
+- **Open in AdvantageScope** — converts the session's JSONL to
+  `.wpilog` and opens it in AdvantageScope on this driver-station
+  laptop directly.
+- **Download .wpilog** — saves the converted file to disk for
+  archival, sharing, or opening on another machine.
+
+Both actions run **entirely on the local machine** and do not need
+RavenScope, RavenBrain, or any internet connection. This is the
+fallback path when the DS is offline at competition: pit-crew
+review between matches, classroom debrief later, or any time you
+want to inspect a session on the same laptop that captured it.
+
+When the DS does have connectivity, the same sessions also show up
+in your RavenScope workspace once they finish uploading — but
+nothing in the local AdvantageScope flow depends on that.
+
 ## Prerequisites
 
 - **OBS Studio 28+** with WebSocket server enabled
